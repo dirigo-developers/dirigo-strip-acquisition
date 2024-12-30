@@ -16,8 +16,8 @@ from dirigo.hw_interfaces.stage import MultiAxisStage
 
 class StripAcquisitionSpec(LineAcquisitionSpec):
     """Specification for a strip scan acquisition."""
-    def __init__(self, x_range: dict, y_range: dict, overlap: float, pixel_height: str = None, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, x_range: dict, y_range: dict, strip_overlap: float, pixel_height: str = None, **kwargs):
+        super().__init__(**kwargs, buffers_per_acquisition=float('inf'))
 
         self.x_range = dirigo.PositionRange(**x_range)
         self.y_range = dirigo.PositionRange(**y_range)
@@ -28,9 +28,9 @@ class StripAcquisitionSpec(LineAcquisitionSpec):
         else:
             self.pixel_height = self.pixel_size
 
-        if not (0 <= overlap < 1):
+        if not (0 <= strip_overlap < 1):
             raise ValueError(f"`overlap` must be a float between 0 and 1")
-        self.overlap = overlap
+        self.strip_overlap = strip_overlap
 
     
 class RectangularFieldStagePositionHelper:
@@ -47,7 +47,7 @@ class RectangularFieldStagePositionHelper:
             return self.spec.x_range
 
     def scan_center(self, strip_index: int) -> dirigo.Position:
-        effective_line_width = self.spec.line_width * (1 - self.spec.overlap) # reduced by the overlap
+        effective_line_width = self.spec.line_width * (1 - self.spec.strip_overlap) # reduced by the overlap
         relative_position = (strip_index + 0.5) * effective_line_width
 
         if self._scan_axis == "x":
@@ -57,7 +57,7 @@ class RectangularFieldStagePositionHelper:
 
     @cached_property
     def nstrips(self) -> int:
-        effective_line_width = self.spec.line_width * (1 - self.spec.overlap)
+        effective_line_width = self.spec.line_width * (1 - self.spec.strip_overlap)
         if self._scan_axis == "x":
             scan_axis_range = self.spec.x_range.range
         else:
@@ -88,7 +88,8 @@ class StripAcquisition(Acquisition):
         # shares hw, data_queue, and spec (internal _stop_event is not shared)
         self._line_acqusition = LineAcquisition(hw, data_queue, spec)
 
-        # Set up stage - anything else?
+        # Set up stage
+        # -record intial state (position, velocity) to restore later
 
         # define functional axes
         if self.hw.fast_raster_scanner.axis == 'x':
@@ -117,30 +118,38 @@ class StripAcquisition(Acquisition):
         self._line_acqusition.start()
         # add some buffer time?
 
-        for strip_index in range(self._positioner.nstrips):
-            if self._stop_event.is_set():
-                # Terminate strip scan
-                break
+        try:
+            for strip_index in range(self._positioner.nstrips):
+                if self._stop_event.is_set():
+                    # Terminate acquisitions
+                    break
 
-            # start web axis movement
-            if strip_index % 2:
-                strip_end_position = self._positioner.web_limits.min
-            else:
-                strip_end_position = self._positioner.web_limits.max
-            self._web_axis_stage.move_to(strip_end_position)
+                # start web axis movement
+                if strip_index % 2:
+                    strip_end_position = self._positioner.web_limits.min
+                else:
+                    strip_end_position = self._positioner.web_limits.max
+                self._web_axis_stage.move_to(strip_end_position)
 
-            # wait until web axis decceleration
-            time.sleep(self._web_period + dirigo.Time('10 ms')) # the last part is empirical
+                # wait until web axis decceleration
+                time.sleep(self._web_period + dirigo.Time('10 ms')) # the last part is empirical
 
-            # begin lateral movement to the next strip
-            if strip_index < (self._positioner.nstrips - 1):
-                self._positioner.scan_center(strip_index=strip_index + 1)
+                # begin lateral movement to the next strip
+                if strip_index < (self._positioner.nstrips - 1):
+                    self._scan_axis_stage.move_to(
+                        self._positioner.scan_center(strip_index=strip_index + 1)
+                    )
 
-            # wait for web axis movement to come to complete stop
-            self._web_axis_stage.wait_until_move_finished()
+                # wait for web axis movement to come to complete stop
+                self._web_axis_stage.wait_until_move_finished()
+
+        finally:
+            # Stop the line acquisition worker
+            self._line_acqusition.stop()
 
     @cached_property
     def _web_velocity(self) -> dirigo.Velocity:
+        """The target velocity for web axis movement."""
         if self.spec.bidirectional_scanning:
             v = 2 * self.hw.fast_raster_scanner.frequency * self.spec.pixel_height
         else:
@@ -149,4 +158,5 @@ class StripAcquisition(Acquisition):
     
     @cached_property
     def _web_period(self) -> dirigo.Time:
+        """The approximate period of time required to capture 1 strip."""
         return self._positioner.web_limits.range / self._web_velocity
