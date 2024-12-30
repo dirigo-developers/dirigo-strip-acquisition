@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dirigo_strip_acquisition"
+version = "0.1.0"
+description = "Plugin for strip acquisitions in Dirigo."
+authors = [
+    {name = "T. D. Weber", email = "tweber@mit.edu"}
+]
+license = {text = "MIT"}
+dependencies = []
+
+[project.entry-points."dirigo_acquisitions"]
+strip = "dirigo_strip_acquisition:StripAcquisition"
