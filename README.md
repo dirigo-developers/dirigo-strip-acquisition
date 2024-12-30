@@ -1,0 +1,1 @@
+# dirigo-strip-acquisition
