@@ -5,7 +5,7 @@ import time
 
 from platformdirs import user_config_dir
 
-import dirigo
+from dirigo import units
 from dirigo.sw_interfaces.acquisition import Acquisition
 from dirigo.builtins.acquisitions import LineAcquisition, LineAcquisitionSpec
 from dirigo.hw_interfaces.digitizer import Digitizer
@@ -19,12 +19,12 @@ class StripAcquisitionSpec(LineAcquisitionSpec):
     def __init__(self, x_range: dict, y_range: dict, strip_overlap: float, pixel_height: str = None, **kwargs):
         super().__init__(**kwargs, buffers_per_acquisition=float('inf'))
 
-        self.x_range = dirigo.PositionRange(**x_range)
-        self.y_range = dirigo.PositionRange(**y_range)
+        self.x_range = units.PositionRange(**x_range)
+        self.y_range = units.PositionRange(**y_range)
 
         # If no pixel height specified, assume square pixel shape
         if pixel_height is not None:
-            self.pixel_height = dirigo.Position(pixel_height)
+            self.pixel_height = units.Position(pixel_height)
         else:
             self.pixel_height = self.pixel_size
 
@@ -40,20 +40,20 @@ class RectangularFieldStagePositionHelper:
         self.spec = spec
     
     @cached_property
-    def web_limits(self) -> dirigo.PositionRange:
+    def web_limits(self) -> units.PositionRange:
         if self._scan_axis == "x":
             return self.spec.y_range
         else:
             return self.spec.x_range
 
-    def scan_center(self, strip_index: int) -> dirigo.Position:
+    def scan_center(self, strip_index: int) -> units.Position:
         effective_line_width = self.spec.line_width * (1 - self.spec.strip_overlap) # reduced by the overlap
         relative_position = (strip_index + 0.5) * effective_line_width
 
         if self._scan_axis == "x":
-            return dirigo.Position(self.spec.x_range.min + relative_position)
+            return units.Position(self.spec.x_range.min + relative_position)
         else:
-            return dirigo.Position(self.spec.y_range.min + relative_position)
+            return units.Position(self.spec.y_range.min + relative_position)
 
     @cached_property
     def nstrips(self) -> int:
@@ -132,7 +132,7 @@ class StripAcquisition(Acquisition):
                 self._web_axis_stage.move_to(strip_end_position)
 
                 # wait until web axis decceleration
-                time.sleep(self._web_period + dirigo.Time('10 ms')) # the last part is empirical
+                time.sleep(self._web_period + units.Time('10 ms')) # the last part is empirical
 
                 # begin lateral movement to the next strip
                 if strip_index < (self._positioner.nstrips - 1):
@@ -148,15 +148,15 @@ class StripAcquisition(Acquisition):
             self._line_acqusition.stop()
 
     @cached_property
-    def _web_velocity(self) -> dirigo.Velocity:
+    def _web_velocity(self) -> units.Velocity:
         """The target velocity for web axis movement."""
         if self.spec.bidirectional_scanning:
             v = 2 * self.hw.fast_raster_scanner.frequency * self.spec.pixel_height
         else:
             v = self.hw.fast_raster_scanner.frequency * self.spec.pixel_height
-        return dirigo.Velocity(v)
+        return units.Velocity(v)
     
     @cached_property
-    def _web_period(self) -> dirigo.Time:
+    def _web_period(self) -> units.Time:
         """The approximate period of time required to capture 1 strip."""
         return self._positioner.web_limits.range / self._web_velocity
