@@ -3,8 +3,10 @@ from functools import cached_property
 from pathlib import Path
 import math
 import time
+from typing import Optional
 
 from platformdirs import user_config_dir
+import numpy as np
 
 from dirigo import units
 from dirigo.sw_interfaces.acquisition import Acquisition
@@ -14,12 +16,21 @@ from dirigo.hw_interfaces.scanner import FastRasterScanner
 from dirigo.hw_interfaces.illuminator import Illuminator
 from dirigo.hw_interfaces.camera import LineScanCamera
 from dirigo.hw_interfaces.stage import MultiAxisStage
+from dirigo.hw_interfaces.encoder import MultiAxisLinearEncoder
+
+from dirigo_e2v_line_scan_camera.dirigo_e2v_line_scan_camera import TriggerModes # TODO eliminate need for this
 
 
 
 class StripAcquisitionSpec(LineAcquisitionSpec):
     """Specification for a strip scan acquisition."""
-    def __init__(self, x_range: dict, y_range: dict, strip_overlap: float, pixel_height: str = None, **kwargs):
+    def __init__(self, 
+                 x_range: dict, y_range: dict, 
+                 strip_overlap: float = 0.2, # default 20% overlap 
+                 pixel_height: Optional[str] = None, # if not set, assume square pixel size
+                 integration_time: Optional[str] = None,
+                 integration_duty_cyle: Optional[float] = None,
+                 **kwargs):
         super().__init__(**kwargs, buffers_per_acquisition=float('inf'))
 
         self.x_range = units.PositionRange(**x_range)
@@ -35,6 +46,13 @@ class StripAcquisitionSpec(LineAcquisitionSpec):
             raise ValueError(f"`overlap` must be a float between 0 and 1")
         self.strip_overlap = strip_overlap
 
+        if integration_time:
+            self.integration_time = units.Time(integration_time)
+            if integration_duty_cyle:
+                self.integration_duty_cyle = integration_duty_cyle
+            else:
+                self.integration_duty_cyle = 0.5
+
     @property
     def lines_per_frame(self) -> int:
         """Alias for lines_per_buffer"""
@@ -43,8 +61,8 @@ class StripAcquisitionSpec(LineAcquisitionSpec):
     
 class RectangularFieldStagePositionHelper:
     """Encapsulates stage runtime position calculations."""
-    def __init__(self, scanner: FastRasterScanner, spec: StripAcquisitionSpec):
-        self._scan_axis = scanner.axis
+    def __init__(self, scan_axis: str, spec: StripAcquisitionSpec):
+        self._scan_axis = scan_axis
         self.spec = spec
     
     @cached_property
@@ -71,7 +89,7 @@ class RectangularFieldStagePositionHelper:
         else:
             scan_axis_range = self.spec.y_range.range
         N = (scan_axis_range - self.spec.line_width) / effective_line_width
-        return math.ceil(N)
+        return max(math.ceil(N), 1)
     
 
 
@@ -94,21 +112,21 @@ class _StripAcquisition(Acquisition, ABC):
         # set up internal line acquisition
         # shares hw, and spec (internal _stop_event is not shared)
         self.setup_line_acquisition(hw, spec)
-        self._line_acquisition: 'PointScanLineAcquisition'
+        self._line_acquisition: 'PointScanLineAcquisition' | 'LineScanCameraLineAcquisition'
 
         # Set up stage
         # -record intial state (position, velocity) to restore later
 
         # define functional axes
-        if self.hw.fast_raster_scanner.axis == 'x':
+        if self._line_acquisition.axis == 'x':
             self._scan_axis_stage = self.hw.stage.x
-            self._web_axis_stage = self.hw.stage.y
+            self._web_axis_stage = self.hw.stage.y # web axis = perpendicular to the fast raster scanner / line-scan camera axis
         else:
             self._scan_axis_stage = self.hw.stage.y
             self._web_axis_stage = self.hw.stage.x
 
         self._positioner = RectangularFieldStagePositionHelper(
-            scanner=self.hw.fast_raster_scanner,
+            scan_axis=self._line_acquisition.axis,
             spec=spec
         )
 
@@ -123,7 +141,7 @@ class _StripAcquisition(Acquisition, ABC):
         When workers subscribe to StripAcquisition, they are actually subscribing
         to internal LineAcquisition.
         """
-        self._line_acqusition.add_subscriber(subscriber)
+        self._line_acquisition.add_subscriber(subscriber)
 
     def run(self):
         # move to start (2 axes)
@@ -133,10 +151,11 @@ class _StripAcquisition(Acquisition, ABC):
         self._web_axis_stage.wait_until_move_finished()
 
         # set velocity
+        self._original_web_velocity = self._web_axis_stage.max_velocity
         self._web_axis_stage.max_velocity = self._web_velocity
 
         # start line acquisition
-        self._line_acqusition.start() 
+        self._line_acquisition.start() 
         
         try:
             for strip_index in range(self._positioner.nstrips):
@@ -165,16 +184,17 @@ class _StripAcquisition(Acquisition, ABC):
 
         finally:
             # Stop the line acquisition worker
-            self._line_acqusition.stop()
+            self._line_acquisition.stop()
+
+            # Revert the web axis velocity
+            self._web_axis_stage.max_velocity = self._original_web_velocity
 
     @cached_property
     def _web_velocity(self) -> units.Velocity:
         """The target velocity for web axis movement."""
-        if self.spec.bidirectional_scanning:
-            v = 2 * self.hw.fast_raster_scanner.frequency * self.spec.pixel_height
-        else:
-            v = self.hw.fast_raster_scanner.frequency * self.spec.pixel_height
-        return units.Velocity(v)
+        return units.Velocity(
+            float(self._line_acquisition.line_frequency) * float(self.spec.pixel_height)
+        )
     
     @cached_property
     def _web_period(self) -> units.Time:
@@ -190,18 +210,32 @@ with a fast scanner like a resonant or polygon scanner.
 Stage position is read out in sync with the line clock for post-hoc dewarping.
 """
 class PointScanLineAcquisition(LineAcquisition):
-    """Customized LineAcquisition that starts linear position measurement 
+    """
+    Customized LineAcquisition that starts linear position measurement 
     (encoders) and allows measuring them by overriding the read_position method.
     """
 
     def __init__(self, hw, spec: LineAcquisitionSpec):
         super().__init__(hw, spec)
 
+    @property
+    def axis(self) -> str:
+        return self.hw.fast_raster_scanner.axis
+    
+    @property
+    def line_frequency(self) -> units.Frequency:
+        if self.spec.bidirectional_scanning:
+            return 2 * self.hw.fast_raster_scanner.frequency
+        else:
+            return self.hw.fast_raster_scanner.frequency
+
     def run(self):
-        """Identical to LineAcquisition's run(), except also starts and stops 
-        the encoders.
         """
-        self.hw.encoders.start(self.hw)
+        Identical to LineAcquisition's run(), except also starts and stops the
+        encoders.
+        """
+        # pass hw reference to allow the method to get initial positions, scanner frequency
+        self.hw.encoders.start_logging(self.hw) 
         try:
             super().run()
         finally:
@@ -229,38 +263,76 @@ A position encoder task provides an external trigger to the camera.
 """
 
 class LineScanCameraLineAcquisition(Acquisition):
-    REQUIRED_RESOURCES = [Illuminator, LineScanCamera]
+    """
+    Customized LineAcquisition that starts an encoder-derived trigger task to
+    linearize the camera acquisitions.
+    """
+    REQUIRED_RESOURCES = [Illuminator, LineScanCamera, MultiAxisLinearEncoder]
 
     def __init__(self, hw, spec):
         super().__init__(hw, spec) # sets up thread, inbox, stores hw, checks resources
+        self.spec: StripAcquisitionSpec
 
         # Set line camera properties
         self.configure_camera()
+
+        # get reference to the encoder channel perpendicular the line-scan camera axis
+        if self.hw.line_scan_camera.axis == 'y':
+            self._encoder = self.hw.encoders.x
+            self._lines_per_strip = round(self.spec.x_range.range / self.spec.pixel_height)
+        else:
+            self._encoder = self.hw.encoders.y
+            self._lines_per_strip = round(self.spec.y_range.range / self.spec.pixel_height)
+
+        self.hw.frame_grabber.prepare_buffers(nbuffers=self._lines_per_strip) # TODO may not want to allocate all lines here
+
+    @property
+    def axis(self) -> str:
+        return self.hw.line_scan_camera.axis
+    
+    @property
+    def line_frequency(self) -> units.Frequency:
+        f = self.spec.integration_duty_cyle \
+            / float(self.hw.line_scan_camera.integration_time)
+        return units.Frequency(f)
     
     def configure_camera(self):
-        # TODO make into profile
-        self.hw.line_scan_camera.integration_time = units.Time("0.2 ms")
-        # gain, external trigger, etc.
+        self.hw.line_scan_camera.integration_time = self.spec.integration_time
+        self.hw.line_scan_camera.trigger_mode = TriggerModes.EXTERNAL_TRIGGER
+        # gain, etc.
 
     def run(self):
-        # set up buffers
-        self.hw.frame_grabber.prepare_buffers(nbuffers=100)
+        self.hw.illuminator.turn_on()
 
-        self.hw.line_scan_camera.start()
+        self.hw.frame_grabber.start()
+        self._encoder.start_triggering(self.spec.pixel_height)
 
         try:
             while not self._stop_event.is_set() and \
-                self.hw.frame_grabber.buffers_acquired < 100: #self.spec.buffers_per_acquisition:
+                self.hw.frame_grabber.buffers_acquired < self._lines_per_strip:
+                
+                time.sleep(0.002)
+                print(self.hw.frame_grabber.buffers_acquired)
 
-                # buffer = self.hw.frame_grabber.get_next_completed_buffer()
-                # self.publish(buffer)
-                pass
+            # confirm we got em all
+            print("final acquired count:", self.hw.frame_grabber.buffers_acquired)
+            superbuffer = self.hw.frame_grabber.get_next_completed_superbuffer()
+            
+            if superbuffer.shape[1] == 1:
+                # Remove the singleton lines dimension, since each sub-buffer is 1-line
+                superbuffer = np.squeeze(superbuffer, axis=1)
+            self.publish(superbuffer)
 
         finally:
             self.cleanup()
 
     def cleanup(self):
-        pass
+        self._encoder.stop()
+        self.hw.illuminator.turn_off()
+        self.hw.frame_grabber.stop()
+
+        # Put None into queue to signal finished, stop scanning
+        self.publish(None)
 
 
 class LineScanCameraStripAcquisition(_StripAcquisition):
@@ -269,4 +341,4 @@ class LineScanCameraStripAcquisition(_StripAcquisition):
     SPEC_OBJECT = StripAcquisitionSpec
 
     def setup_line_acquisition(self, hw, spec):
-        self._line_acqusition = LineScanCameraLineAcquisition(hw, spec)
+        self._line_acquisition = LineScanCameraLineAcquisition(hw, spec)
