@@ -9,7 +9,7 @@ from platformdirs import user_config_dir
 import numpy as np
 
 from dirigo import units
-from dirigo.sw_interfaces.acquisition import Acquisition
+from dirigo.sw_interfaces.acquisition import Acquisition, AcquisitionBuffer
 from dirigo.plugins.acquisitions import LineAcquisition, LineAcquisitionSpec
 from dirigo.hw_interfaces.digitizer import Digitizer
 from dirigo.hw_interfaces.scanner import FastRasterScanner
@@ -29,8 +29,8 @@ class StripAcquisitionSpec(LineAcquisitionSpec):
                  strip_overlap: float = 0.2, # default 20% overlap 
                  pixel_height: Optional[str] = None, # if not set, assume square pixel size
                  integration_time: Optional[str] = None,
-                 integration_duty_cyle: Optional[float] = None,
-                 **kwargs):
+                 integration_duty_cycle: Optional[float] = None,
+                 **kwargs): 
         super().__init__(**kwargs, buffers_per_acquisition=float('inf'))
 
         self.x_range = units.PositionRange(**x_range)
@@ -48,8 +48,8 @@ class StripAcquisitionSpec(LineAcquisitionSpec):
 
         if integration_time:
             self.integration_time = units.Time(integration_time)
-            if integration_duty_cyle:
-                self.integration_duty_cyle = integration_duty_cyle
+            if integration_duty_cycle:
+                self.integration_duty_cyle = integration_duty_cycle
             else:
                 self.integration_duty_cyle = 0.5
 
@@ -243,7 +243,7 @@ class PointScanLineAcquisition(LineAcquisition):
 
     def read_positions(self):
         """Override provides sample positions from linear position encoders."""
-        return self.hw.encoders.read(self.spec.records_per_buffer) 
+        return self.hw.encoders.read_positions(self.spec.records_per_buffer) 
 
 
 class PointScanStripAcquisition(_StripAcquisition):
@@ -267,7 +267,7 @@ class LineScanCameraLineAcquisition(Acquisition):
     Customized LineAcquisition that starts an encoder-derived trigger task to
     linearize the camera acquisitions.
     """
-    REQUIRED_RESOURCES = [Illuminator, LineScanCamera, MultiAxisLinearEncoder]
+    REQUIRED_RESOURCES = [LineScanCamera, Illuminator, MultiAxisLinearEncoder]
 
     def __init__(self, hw, spec):
         super().__init__(hw, spec) # sets up thread, inbox, stores hw, checks resources
@@ -311,7 +311,8 @@ class LineScanCameraLineAcquisition(Acquisition):
             while not self._stop_event.is_set() and \
                 self.hw.frame_grabber.buffers_acquired < self._lines_per_strip:
                 
-                time.sleep(0.002)
+                # TODO get rid of this crude logging
+                time.sleep(0.05)
                 print(self.hw.frame_grabber.buffers_acquired)
 
             # confirm we got em all
@@ -321,7 +322,13 @@ class LineScanCameraLineAcquisition(Acquisition):
             if superbuffer.shape[1] == 1:
                 # Remove the singleton lines dimension, since each sub-buffer is 1-line
                 superbuffer = np.squeeze(superbuffer, axis=1)
-            self.publish(superbuffer)
+
+            self.publish(AcquisitionBuffer(
+                data=superbuffer,
+                timestamps=np.array(
+                    self._encoder.read_timestamps(self._lines_per_strip)
+                )
+            ))
 
         finally:
             self.cleanup()
@@ -336,7 +343,7 @@ class LineScanCameraLineAcquisition(Acquisition):
 
 
 class LineScanCameraStripAcquisition(_StripAcquisition):
-    REQUIRED_RESOURCES = [Illuminator, LineScanCamera, MultiAxisStage] 
+    REQUIRED_RESOURCES = [LineScanCamera, Illuminator, MultiAxisStage] 
     SPEC_LOCATION: str = Path(user_config_dir("Dirigo")) / "acquisition/line_scan_camera_strip"
     SPEC_OBJECT = StripAcquisitionSpec
 

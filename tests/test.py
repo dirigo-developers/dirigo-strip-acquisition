@@ -4,27 +4,19 @@ from dirigo.main import Dirigo
 diri = Dirigo()
     
 acquisition = diri.acquisition_factory('line_scan_camera_strip')
-# processor = diri.processor_factory(acquisition)
-# display = diri.display_factory(processor)
-# logging = diri.logger_factory(processor)
+display = diri.display_factory(acquisition=acquisition)
+logging = diri.logger_factory(acquisition=acquisition)
 
-# Connect threads
-# acquisition.add_subscriber(processor)
-# processor.add_subscriber(display)
-# processor.add_subscriber(logging)
+# Connect workers
+acquisition.add_subscriber(display)
+acquisition.add_subscriber(logging)
 
-# processor.start()
-# display.start()
-# logging.start()
+# start workers
+display.start()
+logging.start()
 acquisition.start()
 
 acquisition.join(timeout=100.0)
-# processor.stop()
+display.stop()
 
 print("Acquisition complete")
-
-
-# Do it again!
-acquisition = diri.acquisition_factory('line_scan_camera_strip')
-acquisition.start()
-acquisition.join(timeout=100.0)
