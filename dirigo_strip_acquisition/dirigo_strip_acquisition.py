@@ -114,9 +114,6 @@ class _StripAcquisition(Acquisition, ABC):
         self.setup_line_acquisition(hw, spec)
         self._line_acquisition: 'PointScanLineAcquisition' | 'LineScanCameraLineAcquisition'
 
-        # Set up stage
-        # -record intial state (position, velocity) to restore later
-
         # define functional axes
         if self._line_acquisition.axis == 'x':
             self._scan_axis_stage = self.hw.stage.x
@@ -129,6 +126,10 @@ class _StripAcquisition(Acquisition, ABC):
             scan_axis=self._line_acquisition.axis,
             spec=spec
         )
+
+        # move to start (2 axes)
+        self._scan_axis_stage.move_to(self._positioner.scan_center(strip_index=0))
+        self._web_axis_stage.move_to(self._positioner.web_limits.min)
 
     @abstractmethod
     def setup_line_acquisition(self):
@@ -144,9 +145,8 @@ class _StripAcquisition(Acquisition, ABC):
         self._line_acquisition.add_subscriber(subscriber)
 
     def run(self):
-        # move to start (2 axes)
-        self._scan_axis_stage.move_to(self._positioner.scan_center(strip_index=0))
-        self._web_axis_stage.move_to(self._positioner.web_limits.min)
+        
+        # Make sure move to start is complete
         self._scan_axis_stage.wait_until_move_finished()
         self._web_axis_stage.wait_until_move_finished()
 
