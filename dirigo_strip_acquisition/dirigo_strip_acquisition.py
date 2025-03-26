@@ -301,6 +301,14 @@ class LineScanCameraLineAcquisition(Acquisition):
         self.hw.line_scan_camera.trigger_mode = TriggerModes.EXTERNAL_TRIGGER
         # gain, etc.
 
+        # sensor size based on spec
+        obj_pixel_size = self.hw.line_scan_camera.pixel_size / self.hw.camera_optics.magnification
+        roi_width = round(self.spec.line_width / obj_pixel_size)
+        self.hw.frame_grabber.roi_width = roi_width
+
+        self.hw.frame_grabber.roi_left = (self.hw.frame_grabber.pixels_width - roi_width) // 2
+        
+
     def run(self):
         self.hw.illuminator.turn_on()
 
