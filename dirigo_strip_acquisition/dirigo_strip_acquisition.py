@@ -145,7 +145,6 @@ class _StripAcquisition(Acquisition, ABC):
         self._line_acquisition.add_subscriber(subscriber)
 
     def run(self):
-        
         # Make sure move to start is complete
         self._scan_axis_stage.wait_until_move_finished()
         self._web_axis_stage.wait_until_move_finished()
@@ -181,6 +180,8 @@ class _StripAcquisition(Acquisition, ABC):
 
                 # wait for web axis movement to come to complete stop
                 self._web_axis_stage.wait_until_move_finished()
+
+                # TODO, call some sort of line acquisition reset
 
         finally:
             # Stop the line acquisition worker
