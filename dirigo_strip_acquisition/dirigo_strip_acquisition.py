@@ -335,7 +335,7 @@ class LineScanCameraLineAcquisition(Acquisition):
             self.publish(AcquisitionBuffer(
                 data=superbuffer,
                 timestamps=np.array(
-                    self._encoder.read_timestamps(self._lines_per_strip)
+                    self._encoder.read_timestamps(self.hw.frame_grabber.buffers_acquired-1)
                 )
             ))
 
