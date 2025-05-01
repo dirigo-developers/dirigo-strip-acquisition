@@ -9,7 +9,7 @@ from platformdirs import user_config_dir
 import numpy as np
 
 from dirigo import units
-from dirigo.sw_interfaces.acquisition import Acquisition, AcquisitionBuffer
+from dirigo.sw_interfaces.acquisition import Acquisition, AcquisitionProduct
 from dirigo.plugins.acquisitions import LineAcquisition, LineAcquisitionSpec
 from dirigo.hw_interfaces.digitizer import Digitizer
 from dirigo.hw_interfaces.scanner import FastRasterScanner
@@ -31,7 +31,7 @@ class StripAcquisitionSpec(LineAcquisitionSpec):
                  integration_time: Optional[str] = None,
                  integration_duty_cycle: Optional[float] = None,
                  **kwargs): 
-        super().__init__(**kwargs, buffers_per_acquisition=float('inf'))
+        super().__init__(buffers_per_acquisition=float('inf'), **kwargs)
 
         self.x_range = units.PositionRange(**x_range)
         self.y_range = units.PositionRange(**y_range)
@@ -88,8 +88,8 @@ class RectangularFieldStagePositionHelper:
             scan_axis_range = self.spec.x_range.range
         else:
             scan_axis_range = self.spec.y_range.range
-        N = (scan_axis_range - self.spec.line_width) / effective_line_width
-        return max(math.ceil(N), 1)
+        N = (scan_axis_range - self.spec.line_width) / effective_line_width + 1
+        return max(round(N), 1)
     
 
 
@@ -155,6 +155,8 @@ class _StripAcquisition(Acquisition, ABC):
 
         # start line acquisition
         self._line_acquisition.start() 
+        while not self._line_acquisition.active.is_set():
+            time.sleep(0.001) # spin until active (indicates digitizer running)
         
         try:
             for strip_index in range(self._positioner.nstrips):
@@ -167,6 +169,7 @@ class _StripAcquisition(Acquisition, ABC):
                     strip_end_position = self._positioner.web_limits.min
                 else:
                     strip_end_position = self._positioner.web_limits.max
+
                 self._web_axis_stage.move_to(strip_end_position)
 
                 # wait until web axis decceleration
@@ -219,6 +222,8 @@ class PointScanLineAcquisition(LineAcquisition):
     def __init__(self, hw, spec: LineAcquisitionSpec):
         super().__init__(hw, spec)
 
+        self._read_positions = 0
+
     @property
     def axis(self) -> str:
         return self.hw.fast_raster_scanner.axis
@@ -232,7 +237,7 @@ class PointScanLineAcquisition(LineAcquisition):
 
     def run(self):
         """
-        Identical to LineAcquisition's run(), except also starts and stops the
+        Identical to StripAcquisition's run(), except also starts and stops the
         encoders.
         """
         # pass hw reference to allow the method to get initial positions, scanner frequency
@@ -244,7 +249,13 @@ class PointScanLineAcquisition(LineAcquisition):
 
     def read_positions(self):
         """Override provides sample positions from linear position encoders."""
-        return self.hw.encoders.read_positions(self.spec.records_per_buffer) 
+        if self._read_positions == 0:
+            # skip first position read
+            self.hw.encoders.read_positions(1)
+            
+        positions = self.hw.encoders.read_positions(self.spec.records_per_buffer) 
+        self._read_positions += self.spec.records_per_buffer
+        return positions
 
 
 class PointScanStripAcquisition(_StripAcquisition):
@@ -253,7 +264,7 @@ class PointScanStripAcquisition(_StripAcquisition):
     SPEC_OBJECT = StripAcquisitionSpec
 
     def setup_line_acquisition(self, hw, spec):
-        self._line_acqusition = PointScanLineAcquisition(hw, spec)
+        self._line_acquisition = PointScanLineAcquisition(hw, spec)
 
 
 """
@@ -332,7 +343,7 @@ class LineScanCameraLineAcquisition(Acquisition):
                 # Remove the singleton lines dimension, since each sub-buffer is 1-line
                 superbuffer = np.squeeze(superbuffer, axis=1)
 
-            self.publish(AcquisitionBuffer(
+            self.publish(AcquisitionProduct(
                 data=superbuffer,
                 timestamps=np.array(
                     self._encoder.read_timestamps(self.hw.frame_grabber.buffers_acquired-1)
@@ -354,7 +365,4 @@ class LineScanCameraLineAcquisition(Acquisition):
 class LineScanCameraStripAcquisition(_StripAcquisition):
     REQUIRED_RESOURCES = [LineScanCamera, Illuminator, MultiAxisStage] 
     SPEC_LOCATION: str = Path(user_config_dir("Dirigo")) / "acquisition/line_scan_camera_strip"
-    SPEC_OBJECT = StripAcquisitionSpec
-
-    def setup_line_acquisition(self, hw, spec):
-        self._line_acquisition = LineScanCameraLineAcquisition(hw, spec)
+    SPEC_OBJECT = Str

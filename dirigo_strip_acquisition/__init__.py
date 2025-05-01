@@ -1,5 +1,14 @@
-from dirigo_strip_acquisition.dirigo_strip_acquisition import (
-    LineScanCameraStripAcquisition, PointScanStripAcquisition
+from dirigo_strip_acquisition.acquisitions import (
+    StripAcquisitionSpec, LineScanCameraStripAcquisition, 
+    PointScanStripAcquisition
 )
+from dirigo_strip_acquisition.processors import (
+    StripProcessor, StripStitcher
+)
+from dirigo_strip_acquisition.loggers import PyramidLogger
 
-__all__ = ['LineScanCameraStripAcquisition', 'PointScanStripAcquisition']
+__all__ = [
+    'StripAcquisitionSpec', 'LineScanCameraStripAcquisition', 
+    'PointScanStripAcquisition', 'StripProcessor', 'StripStitcher',
+    'PyramidLogger'
+]

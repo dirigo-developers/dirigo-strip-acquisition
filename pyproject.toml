@@ -15,3 +15,10 @@ dependencies = []
 [project.entry-points."dirigo_acquisitions"]
 point_scan_strip = "dirigo_strip_acquisition:PointScanStripAcquisition"
 line_scan_camera_strip = "dirigo_strip_acquisition:LineScanCameraStripAcquisition"
+
+[project.entry-points."dirigo_processors"]
+point_scan_strip = "dirigo_strip_acquisition:StripProcessor"
+strip_stitcher = "dirigo_strip_acquisition:StripStitcher"
+
+[project.entry-points."dirigo_loggers"]
+pyramid = "dirigo_strip_acquisition:PyramidLogger"
