@@ -365,4 +365,7 @@ class LineScanCameraLineAcquisition(Acquisition):
 class LineScanCameraStripAcquisition(_StripAcquisition):
     REQUIRED_RESOURCES = [LineScanCamera, Illuminator, MultiAxisStage] 
     SPEC_LOCATION: str = Path(user_config_dir("Dirigo")) / "acquisition/line_scan_camera_strip"
-    SPEC_OBJECT = Str
+    SPEC_OBJECT = StripAcquisitionSpec
+
+    def setup_line_acquisition(self, hw, spec):
+        self._line_acquisition = LineScanCameraLineAcquisition(hw, spec)
