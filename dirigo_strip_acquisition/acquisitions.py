@@ -21,30 +21,46 @@ from dirigo.hw_interfaces.encoder import MultiAxisLinearEncoder
 from dirigo_e2v_line_scan_camera.dirigo_e2v_line_scan_camera import TriggerModes # TODO eliminate need for this
 
 
+"""
+Comments:
+Scan dimension: parallel to the fastest acquired line (fast raster scanner or 
+camera pixel array)
+Web dimension: orthogonal to scan dimension
+
+Scan/web dimensions may correspond to either global X or Y, however due to
+limitations in the way tiled tiffs are saved, in the final stitched image the 
+web dimension will be horizontal and scan dimension will be vertical.
+
+Limitations:
+Pixel size can only be square: will use pixel size (along scan dimension as
+pixel height)
+Overlap will be adjusted such that an integer pixel overlap is used.
+"""
+
 
 class StripAcquisitionSpec(LineAcquisitionSpec):
     """Specification for a strip scan acquisition."""
     def __init__(self, 
-                 x_range: dict, y_range: dict, 
-                 strip_overlap: float = 0.2, # default 20% overlap 
-                 pixel_height: Optional[str] = None, # if not set, assume square pixel size
+                 x_range: dict, 
+                 y_range: dict, 
+                 strip_overlap: float = 0.1, # default 10% overlap 
                  integration_time: Optional[str] = None,
                  integration_duty_cycle: Optional[float] = None,
                  **kwargs): 
+        """
+        Create a spec object for strip scan. 
+        """
         super().__init__(buffers_per_acquisition=float('inf'), **kwargs)
 
         self.x_range = units.PositionRange(**x_range)
         self.y_range = units.PositionRange(**y_range)
 
-        # If no pixel height specified, assume square pixel shape
-        if pixel_height is not None:
-            self.pixel_height = units.Position(pixel_height)
-        else:
-            self.pixel_height = self.pixel_size
+        self.pixel_height = self.pixel_size # constrain to square pixel
 
         if not (0 <= strip_overlap < 1):
             raise ValueError(f"`overlap` must be a float between 0 and 1")
-        self.strip_overlap = strip_overlap
+        # round to nearest integer pixel overlap
+        self.strip_overlap = round(strip_overlap * self.pixels_per_line) / self.pixels_per_line
 
         if integration_time:
             self.integration_time = units.Time(integration_time)
@@ -57,8 +73,7 @@ class StripAcquisitionSpec(LineAcquisitionSpec):
     def lines_per_frame(self) -> int:
         """Alias for lines_per_buffer"""
         return self.lines_per_buffer 
-
-    
+      
 class RectangularFieldStagePositionHelper:
     """Encapsulates stage runtime position calculations."""
     def __init__(self, scan_axis: str, spec: StripAcquisitionSpec):
@@ -73,6 +88,7 @@ class RectangularFieldStagePositionHelper:
             return self.spec.x_range
 
     def scan_center(self, strip_index: int) -> units.Position:
+        """Return the center position (along scan dimension) for `strip_index`"""
         effective_line_width = self.spec.line_width * (1 - self.spec.strip_overlap) # reduced by the overlap
         relative_position = (strip_index + 0.5) * effective_line_width
 
@@ -82,18 +98,18 @@ class RectangularFieldStagePositionHelper:
             return units.Position(self.spec.y_range.min + relative_position)
 
     @cached_property
-    def nstrips(self) -> int:
+    def n_strips(self) -> int:
         effective_line_width = self.spec.line_width * (1 - self.spec.strip_overlap)
         if self._scan_axis == "x":
             scan_axis_range = self.spec.x_range.range
         else:
             scan_axis_range = self.spec.y_range.range
         N = (scan_axis_range - self.spec.line_width) / effective_line_width + 1
-        return max(round(N), 1)
+        return max(math.ceil(N), 1)
     
 
 
-class _StripAcquisition(Acquisition, ABC):
+class StripBaseAcquisition(Acquisition, ABC):
     """
     Base class for strip scan acquistion worker.
 
@@ -127,9 +143,29 @@ class _StripAcquisition(Acquisition, ABC):
             spec=spec
         )
 
-        # move to start (2 axes)
-        self._scan_axis_stage.move_to(self._positioner.scan_center(strip_index=0))
-        self._web_axis_stage.move_to(self._positioner.web_limits.min)
+        if isinstance(self._line_acquisition.data_acquisition_device, Digitizer):
+            n_channels = self._line_acquisition.hw.digitizer.acquire.n_channels_enabled
+        else:
+            n_channels = 1
+
+        if self._line_acquisition.axis == 'x':
+            n_pixels_scan = round(self.spec.x_range.range / self.spec.pixel_size)
+            n_pixels_web  = round(self.spec.y_range.range / self.spec.pixel_size)
+        else:
+            n_pixels_scan = round(self.spec.y_range.range / self.spec.pixel_size)
+            n_pixels_web  = round(self.spec.x_range.range / self.spec.pixel_size)
+
+        self._final_shape = (
+            n_pixels_scan,
+            n_pixels_web,
+            n_channels
+        )
+
+    @property
+    def final_shape(self) -> tuple[int,int,int]:
+        """Shape of the final stitched image with dimensions: (scan, web, chan)"""
+        return self._final_shape
+        
 
     @abstractmethod
     def setup_line_acquisition(self):
@@ -145,21 +181,23 @@ class _StripAcquisition(Acquisition, ABC):
         self._line_acquisition.add_subscriber(subscriber)
 
     def run(self):
-        # Make sure move to start is complete
+        # move to start (2 axes)
+        self._scan_axis_stage.move_to(self._positioner.scan_center(strip_index=0))
+        self._web_axis_stage.move_to(self._positioner.web_limits.min)
         self._scan_axis_stage.wait_until_move_finished()
         self._web_axis_stage.wait_until_move_finished()
 
-        # set velocity
+        # set strip velocity
         self._original_web_velocity = self._web_axis_stage.max_velocity
         self._web_axis_stage.max_velocity = self._web_velocity
 
         # start line acquisition
         self._line_acquisition.start() 
         while not self._line_acquisition.active.is_set():
-            time.sleep(0.001) # spin until active (indicates digitizer running)
+            time.sleep(0.001) # spin until active (indicates data acquiring)
         
         try:
-            for strip_index in range(self._positioner.nstrips):
+            for strip_index in range(self._positioner.n_strips):
                 if self._stop_event.is_set():
                     # Terminate acquisitions
                     break
@@ -176,7 +214,7 @@ class _StripAcquisition(Acquisition, ABC):
                 time.sleep(self._web_period + units.Time('10 ms')) # the last part is empirical
 
                 # begin lateral movement to the next strip
-                if strip_index < (self._positioner.nstrips - 1):
+                if strip_index < (self._positioner.n_strips - 1):
                     self._scan_axis_stage.move_to(
                         self._positioner.scan_center(strip_index=strip_index + 1)
                     )
@@ -248,7 +286,7 @@ class PointScanLineAcquisition(LineAcquisition):
             self.hw.encoders.stop()
 
     def read_positions(self):
-        """Override provides sample positions from linear position encoders."""
+        """Override provides sample positions from linear position encoders."""  # TODO: order dimensions scan, web?
         if self._read_positions == 0:
             # skip first position read
             self.hw.encoders.read_positions(1)
@@ -258,7 +296,7 @@ class PointScanLineAcquisition(LineAcquisition):
         return positions
 
 
-class PointScanStripAcquisition(_StripAcquisition):
+class PointScanStripAcquisition(StripBaseAcquisition):
     REQUIRED_RESOURCES = [Digitizer, FastRasterScanner, MultiAxisStage] 
     SPEC_LOCATION: str = Path(user_config_dir("Dirigo")) / "acquisition/point_scan_strip"
     SPEC_OBJECT = StripAcquisitionSpec
@@ -362,7 +400,7 @@ class LineScanCameraLineAcquisition(Acquisition):
         self.publish(None)
 
 
-class LineScanCameraStripAcquisition(_StripAcquisition):
+class LineScanCameraStripAcquisition(StripBaseAcquisition):
     REQUIRED_RESOURCES = [LineScanCamera, Illuminator, MultiAxisStage] 
     SPEC_LOCATION: str = Path(user_config_dir("Dirigo")) / "acquisition/line_scan_camera_strip"
     SPEC_OBJECT = StripAcquisitionSpec

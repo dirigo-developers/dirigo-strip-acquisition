@@ -19,6 +19,7 @@ line_scan_camera_strip = "dirigo_strip_acquisition:LineScanCameraStripAcquisitio
 [project.entry-points."dirigo_processors"]
 point_scan_strip = "dirigo_strip_acquisition:StripProcessor"
 strip_stitcher = "dirigo_strip_acquisition:StripStitcher"
+tile_builder = "dirigo_strip_acquisition:TileBuilder"
 
 [project.entry-points."dirigo_loggers"]
 pyramid = "dirigo_strip_acquisition:PyramidLogger"
