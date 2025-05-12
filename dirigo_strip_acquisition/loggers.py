@@ -37,11 +37,11 @@ class PyramidLogger(Logger):
 
     def __init__(self, upstream: TileBuilder, levels: tuple = (1, 2, 8)):
         super().__init__(upstream)
-        self._acquisition: StripBaseAcquisition
+        self._acq: StripBaseAcquisition
         
         self._file       = self.save_path / f"{self.basename}.ome.tif"
         self._n_channels = upstream._n_channels
-        self._shape      = self._acquisition.final_shape
+        self._shape      = self._acq.final_shape
         self._dtype      = upstream.data_range.recommended_dtype
         self._tile_shape = upstream._tile_shape
         self._levels     = levels
@@ -120,6 +120,7 @@ class PyramidLogger(Logger):
         
         finally:
             self.publish(None)
+            print("Image write complete")
 
     def save_data(self, data):
         pass

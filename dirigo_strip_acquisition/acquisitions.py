@@ -50,7 +50,9 @@ class StripAcquisitionSpec(LineAcquisitionSpec):
         """
         Create a spec object for strip scan. 
         """
-        super().__init__(buffers_per_acquisition=float('inf'), **kwargs)
+        if "buffers_per_acquisition" not in kwargs:
+            kwargs["buffers_per_acquisition"] = float('inf')
+        super().__init__(**kwargs)
 
         self.x_range = units.PositionRange(**x_range)
         self.y_range = units.PositionRange(**y_range)
@@ -121,13 +123,13 @@ class StripBaseAcquisition(Acquisition, ABC):
     SPEC_OBJECT, and provide a method of setup_line_acquisition()
     """
     
-    def __init__(self, hw, spec: StripAcquisitionSpec):
-        super().__init__(hw, spec)
+    def __init__(self, hw, system_config, spec: StripAcquisitionSpec):
+        super().__init__(hw, system_config, spec)
         self.spec: StripAcquisitionSpec
 
         # set up internal line acquisition
         # shares hw, and spec (internal _stop_event is not shared)
-        self.setup_line_acquisition(hw, spec)
+        self.setup_line_acquisition(hw, system_config, spec)
         self._line_acquisition: 'PointScanLineAcquisition' | 'LineScanCameraLineAcquisition'
 
         # define functional axes
@@ -138,7 +140,7 @@ class StripBaseAcquisition(Acquisition, ABC):
             self._scan_axis_stage = self.hw.stage.y
             self._web_axis_stage = self.hw.stage.x
 
-        self._positioner = RectangularFieldStagePositionHelper(
+        self.positioner = RectangularFieldStagePositionHelper(
             scan_axis=self._line_acquisition.axis,
             spec=spec
         )
@@ -182,8 +184,8 @@ class StripBaseAcquisition(Acquisition, ABC):
 
     def run(self):
         # move to start (2 axes)
-        self._scan_axis_stage.move_to(self._positioner.scan_center(strip_index=0))
-        self._web_axis_stage.move_to(self._positioner.web_limits.min)
+        self._scan_axis_stage.move_to(self.positioner.scan_center(strip_index=0))
+        self._web_axis_stage.move_to(self.positioner.web_limits.min)
         self._scan_axis_stage.wait_until_move_finished()
         self._web_axis_stage.wait_until_move_finished()
 
@@ -195,18 +197,22 @@ class StripBaseAcquisition(Acquisition, ABC):
         self._line_acquisition.start() 
         while not self._line_acquisition.active.is_set():
             time.sleep(0.001) # spin until active (indicates data acquiring)
+
+        # If slow raster scanner present, park in
+        if self.hw.slow_raster_scanner:
+            self.hw.slow_raster_scanner.center()
         
         try:
-            for strip_index in range(self._positioner.n_strips):
+            for strip_index in range(self.positioner.n_strips):
                 if self._stop_event.is_set():
                     # Terminate acquisitions
                     break
 
                 # start web axis movement
                 if strip_index % 2:
-                    strip_end_position = self._positioner.web_limits.min
+                    strip_end_position = self.positioner.web_limits.min
                 else:
-                    strip_end_position = self._positioner.web_limits.max
+                    strip_end_position = self.positioner.web_limits.max
 
                 self._web_axis_stage.move_to(strip_end_position)
 
@@ -214,9 +220,9 @@ class StripBaseAcquisition(Acquisition, ABC):
                 time.sleep(self._web_period + units.Time('10 ms')) # the last part is empirical
 
                 # begin lateral movement to the next strip
-                if strip_index < (self._positioner.n_strips - 1):
+                if strip_index < (self.positioner.n_strips - 1):
                     self._scan_axis_stage.move_to(
-                        self._positioner.scan_center(strip_index=strip_index + 1)
+                        self.positioner.scan_center(strip_index=strip_index + 1)
                     )
 
                 # wait for web axis movement to come to complete stop
@@ -226,10 +232,20 @@ class StripBaseAcquisition(Acquisition, ABC):
 
         finally:
             # Stop the line acquisition worker
+            if self.hw.slow_raster_scanner:
+                self.hw.slow_raster_scanner.park()
             self._line_acquisition.stop()
 
             # Revert the web axis velocity
             self._web_axis_stage.max_velocity = self._original_web_velocity
+
+    @property
+    def runtime_info(self):
+        return self._line_acquisition.runtime_info
+    
+    @property
+    def digitizer_profile(self):
+        return self._line_acquisition.digitizer_profile
 
     @cached_property
     def _web_velocity(self) -> units.Velocity:
@@ -241,7 +257,7 @@ class StripBaseAcquisition(Acquisition, ABC):
     @cached_property
     def _web_period(self) -> units.Time:
         """The approximate period of time required to capture 1 strip."""
-        return self._positioner.web_limits.range / self._web_velocity
+        return self.positioner.web_limits.range / self._web_velocity
     
 
 """
@@ -257,8 +273,8 @@ class PointScanLineAcquisition(LineAcquisition):
     (encoders) and allows measuring them by overriding the read_position method.
     """
 
-    def __init__(self, hw, spec: LineAcquisitionSpec):
-        super().__init__(hw, spec)
+    def __init__(self, hw, system_config, spec: LineAcquisitionSpec):
+        super().__init__(hw, system_config, spec)
 
         self._read_positions = 0
 
@@ -301,8 +317,8 @@ class PointScanStripAcquisition(StripBaseAcquisition):
     SPEC_LOCATION: str = Path(user_config_dir("Dirigo")) / "acquisition/point_scan_strip"
     SPEC_OBJECT = StripAcquisitionSpec
 
-    def setup_line_acquisition(self, hw, spec):
-        self._line_acquisition = PointScanLineAcquisition(hw, spec)
+    def setup_line_acquisition(self, hw, system_config, spec):
+        self._line_acquisition = PointScanLineAcquisition(hw, system_config, spec)
 
 
 """
@@ -405,5 +421,5 @@ class LineScanCameraStripAcquisition(StripBaseAcquisition):
     SPEC_LOCATION: str = Path(user_config_dir("Dirigo")) / "acquisition/line_scan_camera_strip"
     SPEC_OBJECT = StripAcquisitionSpec
 
-    def setup_line_acquisition(self, hw, spec):
-        self._line_acquisition = LineScanCameraLineAcquisition(hw, spec)
+    def setup_line_acquisition(self, hw, system_config, spec):
+        self._line_acquisition = LineScanCameraLineAcquisition(hw, system_config, spec)

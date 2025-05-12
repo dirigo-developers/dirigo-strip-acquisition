@@ -65,21 +65,20 @@ class StripProcessor(Processor):
         super().__init__(upstream)
 
         self._spec: StripAcquisitionSpec
-        self._acq: PointScanStripAcquisition
+        self._acq: StripBaseAcquisition # or loader
+        self._system_config = self._acq.system_config
         self._data_range = upstream.data_range
 
-        # positions are stored in order (web, scan)        
-        if self._acq._web_axis_stage.axis == "x": 
+        # positions are stored in order (web, scan)       
+        if self._system_config.fast_raster_scanner['axis'] == "y": 
             self._web_min = self._spec.x_range.min
-        elif self._acq._web_axis_stage.axis == "y":
+        elif self._system_config.fast_raster_scanner['axis'] == "x":
             self._web_min = self._spec.y_range.min
         else:
             raise RuntimeError
-        pp = (
-            self._web_min,
-            self._acq._positioner.scan_center(0)
-        )
-        self._prev_position = np.array(pp, dtype=np.float64)
+        
+        prev_position = (self._web_min, self._acq.positioner.scan_center(0))
+        self._prev_position = np.array(prev_position, dtype=np.float64)
 
         self._strip_shape = ( # strips are assembled in dim order: (web,scan,chan)
             self._acq.final_shape[1],
@@ -108,9 +107,9 @@ class StripProcessor(Processor):
 
                     # re-order positions (x,y) to dim order (web,scan)
                     # exclude z axis positions, if present
-                    if self._acq._web_axis_stage.axis == "y":
+                    if self._system_config.fast_raster_scanner['axis'] == "x":
                         p = p[:,1::-1] # switch
-                    elif self._acq._web_axis_stage.axis == "x":
+                    elif self._system_config.fast_raster_scanner['axis'] == "y":
                         p = p[:,:2] 
 
                     if self._spec.bidirectional_scanning:
@@ -136,7 +135,7 @@ class StripProcessor(Processor):
 
                     strip_center_min = np.array([
                         self._web_min,
-                        self._acq._positioner.scan_center(self._strip_idx)                        
+                        self._acq.positioner.scan_center(self._strip_idx)                        
                     ])
                     strip_positions = positions - strip_center_min[np.newaxis,:]
                     
@@ -145,13 +144,13 @@ class StripProcessor(Processor):
                         lines=frame.data,
                         positions=strip_positions,
                         pixel_size=self._spec.pixel_size,
-                        flip_line=True
+                        flip_line=False
                     )
 
                     # Check whether this frame includes move to next strip
                     width = self._spec.line_width * (1 - self._spec.strip_overlap)
                     latest_strip_idx = round(
-                        (self._prev_position[1] - self._acq._positioner.scan_center(0)) / width
+                        (self._prev_position[1] - self._acq.positioner.scan_center(0)) / width
                     )
 
                     if latest_strip_idx == self._strip_idx + 1:
@@ -166,7 +165,7 @@ class StripProcessor(Processor):
                         # add any leftover lines to new strip
                         strip_center_min = np.array([
                             self._web_min,
-                            self._acq._positioner.scan_center(self._strip_idx)                            
+                            self._acq.positioner.scan_center(self._strip_idx)                            
                         ])
                         strip_positions = positions - strip_center_min[np.newaxis,:]
                         
@@ -175,7 +174,7 @@ class StripProcessor(Processor):
                             lines=frame.data,
                             positions=strip_positions,
                             pixel_size=self._spec.pixel_size,
-                            flip_line=True
+                            flip_line=False
                         )
                         
 
@@ -195,16 +194,17 @@ class StripProcessor(Processor):
 def _linear_blend(strip_a: np.ndarray, strip_b: np.ndarray, overlap_px: int):
     """Blend the right `overlap_px` columns of `strip_a`
        with the left `overlap_px` columns of `strip_b`."""
-    w = overlap_px
-    alpha = np.linspace(0, 1, w, dtype=np.float32)[np.newaxis, :, np.newaxis]  # (1,w,1)
+    if overlap_px > 0:
+        w = overlap_px
+        alpha = np.linspace(0, 1, w, dtype=np.float32)[np.newaxis, :, np.newaxis]  # (1,w,1)
 
-    strip_a_end = strip_a[:, -w:, :].astype(np.float32)
-    strip_b_start = strip_b[:, :w, :].astype(np.float32)
+        strip_a_end = strip_a[:, -w:, :].astype(np.float32)
+        strip_b_start = strip_b[:, :w, :].astype(np.float32)
 
-    blended = ((1 - alpha) * strip_a_end + alpha * strip_b_start).astype(strip_a.dtype)
+        blended = ((1 - alpha) * strip_a_end + alpha * strip_b_start).astype(strip_a.dtype)
 
-    strip_a[:, -w:, :] = blended
-    strip_b[:, :w,  :] = blended
+        strip_a[:, -w:, :] = blended
+        strip_b[:, :w,  :] = blended
 
 
 class StripStitcher(Processor):
@@ -388,7 +388,7 @@ class TileBuilder(Processor):
                         ]
                         tile.data[:data2.shape[0], -data2.shape[1]:, :] = data2
                     
-                    if self._acq._web_axis_stage.axis == "y":
+                    if self._acq.system_config.fast_raster_scanner['axis'] == "x":
                         _transpose_inplace(tile.data)
                         #_rotate90_inplace(tile.data, False)
 
