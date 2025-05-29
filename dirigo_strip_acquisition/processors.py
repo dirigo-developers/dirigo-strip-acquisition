@@ -1,13 +1,15 @@
 import math
 
-from numba import njit, prange, types
+from platformdirs import user_config_path
+import tifffile
+from numba import njit, prange, int16, float64, int64, boolean
 import numpy as np
 
 from dirigo import units
 from dirigo.sw_interfaces.worker import Product
 from dirigo.sw_interfaces.processor import Processor, ProcessorProduct
 from dirigo.plugins.processors import RasterFrameProcessor  
-from dirigo_strip_acquisition import PointScanStripAcquisition, StripAcquisitionSpec
+from dirigo_strip_acquisition import StripAcquisitionSpec
 from dirigo_strip_acquisition.acquisitions import StripBaseAcquisition
 
 """
@@ -16,23 +18,22 @@ Expected limitations:
 """
 
 sig = [
-#    strip               lines               positions           pixel_size     flip_line
-    (types.int16[:,:,:], types.int16[:,:,:], types.float64[:,:], types.float64, types.boolean)
+#         strip         lines         positions     pixel_size  prev_row  flip_line
+    int64(int16[:,:,:], int16[:,:,:], float64[:,:], float64,    int64,    boolean)
 ]
 @njit(sig, parallel=True, fastmath=True, cache=True)
 def _line_placement_kernel(strip: np.ndarray,     # dim order (web, scan, chan)
                            lines: np.ndarray,     # dim order (web, scan, chan)
                            positions: np.ndarray, # dim order (web, scan)
                            pixel_size: float,
-                           flip_line: bool) -> None:
+                           prev_row: int,
+                           flip_line: bool) -> int:
     n_height, n_width, n_chan = strip.shape
-
-    prev_row   = -1
-    # prev_shift = 0
-    # prev_line  = np.empty((n_width, n_chan), dtype=strip.dtype)
 
     for idx in prange(lines.shape[0]):
         # compute where this line should go
+        if idx > 0:
+            prev_row = int(round(positions[idx-1, 0] / pixel_size))
         cur_row   = int(round(positions[idx, 0] / pixel_size))
         cur_shift = int(round(positions[idx, 1] / pixel_size))
 
@@ -56,7 +57,7 @@ def _line_placement_kernel(strip: np.ndarray,     # dim order (web, scan, chan)
             for j in range(n_width):
                 strip[(cur_row + prev_row)//2, j, :] = strip[cur_row, j, :]
 
-        prev_row = cur_row
+    return int(round(positions[lines.shape[0]-1, 0] / pixel_size))
 
 
 class StripProcessor(Processor):
@@ -68,16 +69,10 @@ class StripProcessor(Processor):
         self._acq: StripBaseAcquisition # or loader
         self._system_config = self._acq.system_config
         self._data_range = upstream.data_range
+        self._positioner = self._acq.positioner 
 
-        # positions are stored in order (web, scan)       
-        if self._system_config.fast_raster_scanner['axis'] == "y": 
-            self._web_min = self._spec.x_range.min
-        elif self._system_config.fast_raster_scanner['axis'] == "x":
-            self._web_min = self._spec.y_range.min
-        else:
-            raise RuntimeError
-        
-        prev_position = (self._web_min, self._acq.positioner.scan_center(0))
+        # positions are stored in order (web, scan)
+        prev_position = (self._positioner.web_min(0), self._positioner.scan_center(0))
         self._prev_position = np.array(prev_position, dtype=np.float64)
 
         self._strip_shape = ( # strips are assembled in dim order: (web,scan,chan)
@@ -85,15 +80,15 @@ class StripProcessor(Processor):
             self._spec.pixels_per_line,
             self._acq.final_shape[2]
         )
-
         self.init_product_pool(n=4, shape=self._strip_shape, dtype=np.int16)
         
         self._strip_idx = 0
+        self._prev_row = -1 # increments as _line_placement_kernel is called
 
     def run(self):
         try:
             strip = self.get_free_product()
-            strip.data[...] = 0
+            strip.data[...] = 0 # TODO, check performance impact of this
 
             while True:
                 frame: ProcessorProduct = self.inbox.get()
@@ -134,23 +129,24 @@ class StripProcessor(Processor):
                     self._prev_position = p[-1,:]
 
                     strip_center_min = np.array([
-                        self._web_min,
-                        self._acq.positioner.scan_center(self._strip_idx)                        
+                        self._positioner.web_min(self._strip_idx),   
+                        self._positioner.scan_center(self._strip_idx)                        
                     ])
                     strip_positions = positions - strip_center_min[np.newaxis,:]
                     
-                    _line_placement_kernel(             # add lines to strip
+                    self._prev_row = _line_placement_kernel( # add lines to strip
                         strip=strip.data, 
                         lines=frame.data,
                         positions=strip_positions,
                         pixel_size=self._spec.pixel_size,
+                        prev_row=self._prev_row,
                         flip_line=False
                     )
 
                     # Check whether this frame includes move to next strip
                     width = self._spec.line_width * (1 - self._spec.strip_overlap)
                     latest_strip_idx = round(
-                        (self._prev_position[1] - self._acq.positioner.scan_center(0)) / width
+                        (self._prev_position[1] - self._positioner.scan_center(0)) / width
                     )
 
                     if latest_strip_idx == self._strip_idx + 1:
@@ -164,16 +160,17 @@ class StripProcessor(Processor):
 
                         # add any leftover lines to new strip
                         strip_center_min = np.array([
-                            self._web_min,
-                            self._acq.positioner.scan_center(self._strip_idx)                            
+                            self._positioner.web_min(self._strip_idx),
+                            self._positioner.scan_center(self._strip_idx)                            
                         ])
                         strip_positions = positions - strip_center_min[np.newaxis,:]
                         
-                        _line_placement_kernel( 
+                        self._prev_row = _line_placement_kernel( 
                             strip=strip.data, 
                             lines=frame.data,
                             positions=strip_positions,
                             pixel_size=self._spec.pixel_size,
+                            prev_row=self._prev_row,
                             flip_line=False
                         )
                         
@@ -392,7 +389,7 @@ class TileBuilder(Processor):
                         _transpose_inplace(tile.data)
                         #_rotate90_inplace(tile.data, False)
 
-                    print(f"Publishing tile {tile_idx}: ({t_s},{t_w}), shape: {tile.data.shape}, dtype: {tile.data.dtype}")
+                    #print(f"Publishing tile {tile_idx}: ({t_s},{t_w}), shape: {tile.data.shape}, dtype: {tile.data.dtype}")
                     self.publish(tile)
                     tile_idx += 1
 

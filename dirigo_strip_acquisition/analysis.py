@@ -1,40 +1,26 @@
 from pathlib import Path
-import struct, json
+import json
 
 import numpy as np
+from numpy.polynomial.polynomial import Polynomial
+from platformdirs import user_config_path
 import tifffile
 
 from dirigo.components.io import SystemConfig
+from dirigo.sw_interfaces.logger import Logger
 from dirigo.sw_interfaces.acquisition import AcquisitionProduct, Loader
+from dirigo.sw_interfaces.processor import ProcessorProduct
 from dirigo.hw_interfaces.digitizer import DigitizerProfile
 from dirigo.plugins.acquisitions import LineAcquisitionRuntimeInfo
 from dirigo.plugins.loggers import TiffLogger
 from dirigo.plugins.processors import RasterFrameProcessor
+from dirigo.plugins.loaders import deserialize_float64_list
 from dirigo_strip_acquisition.acquisitions import (
     StripAcquisitionSpec, RectangularFieldStagePositionHelper
 )
 from dirigo_strip_acquisition.processors import StripProcessor, StripStitcher, TileBuilder
 from dirigo_strip_acquisition.loggers import PyramidLogger
 
-
-def deserialize_float64_list(blob: bytes):
-    """
-    Reverse of `serialize_float64_list` (full shape in header).
-    Returns a list of np.ndarray, all copies (writable).
-    """
-    ndims, = struct.unpack_from("<Q", blob, 0)
-
-    fmt          = f"<Q{ndims}Q"
-    header_size  = struct.calcsize(fmt)
-    shape        = struct.unpack_from(fmt, blob, 0)[1:]   # skip ndims
-
-    items_per_frame = np.prod(shape)
-    bytes_per_frame = items_per_frame * 8                    # float64 → 8 B
-    n_frames        = (len(blob) - header_size) // bytes_per_frame
-
-    data   = np.frombuffer(blob, dtype=np.float64, offset=header_size)
-    stack  = data.reshape((n_frames, *shape))
-    return [stack[i].copy() for i in range(n_frames)]
 
 
 class StripAcquisitionLoader(Loader): 
@@ -65,6 +51,7 @@ class StripAcquisitionLoader(Loader):
 
         self.positioner = RectangularFieldStagePositionHelper(
             scan_axis=self.system_config.fast_raster_scanner['axis'],
+            axis_error=self.system_config.fast_raster_scanner['axis_error'],
             spec=self.spec
         )
         
@@ -112,7 +99,7 @@ class StripAcquisitionLoader(Loader):
         finally:
             self.publish(None) # sentinel coding finished
         
-
+    # TODO, check that these are not already implemented and we are (unnecessarily) shadowing them here
     def init_product_pool(self, n, shape, dtype):
         for _ in range(n):
             aq_buf = AcquisitionProduct(
@@ -125,9 +112,49 @@ class StripAcquisitionLoader(Loader):
         return self._product_pool.get()
     
 
+class SignalGradientLogger(Logger):
+    def __init__(self, upstream):
+        super().__init__(upstream)
+        self._strip_sum = None
+
+    def run(self):
+        try:
+            while True:
+                strip: ProcessorProduct = self.inbox.get()
+                if strip is None:
+                    break
+
+                with strip:
+                    if self._strip_sum is not None:
+                        self._strip_sum += np.sum(strip.data[...,0], axis=0)
+                    else:
+                        self._strip_sum = np.sum(strip.data[...,0], axis=0)
+
+        finally:
+            self.save_data(self._strip_sum)
+            self.publish(None)
+
+    def save_data(self, strip_sum: np.ndarray):
+        # Fit data to polynomial
+        x = np.arange(len(strip_sum))
+        gradient_fit = Polynomial.fit(
+            x=x,
+            y=1 / strip_sum,
+            deg=2
+        )
+        
+        gradient: np.ndarray = gradient_fit(x)
+        gradient /= gradient.max()
+        
+        fn = user_config_path("Dirigo") / f"optics/gradient_calibration.tif"
+        with tifffile.TiffWriter(fn) as tif:
+            tif.write(gradient.astype(np.float32))
+
+        
 
 
 if __name__ == "__main__":
+    # Use to reprocess raw saved datasets
     fn = r"C:\Users\MIT\Documents\Dirigo\experiment.tif"
 
     loader = StripAcquisitionLoader(fn)
@@ -150,3 +177,5 @@ if __name__ == "__main__":
     logger.start()
 
     loader.start()
+
+    logger.join(30)

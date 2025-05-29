@@ -78,8 +78,9 @@ class StripAcquisitionSpec(LineAcquisitionSpec):
       
 class RectangularFieldStagePositionHelper:
     """Encapsulates stage runtime position calculations."""
-    def __init__(self, scan_axis: str, spec: StripAcquisitionSpec):
+    def __init__(self, scan_axis: str, axis_error: units.Angle, spec: StripAcquisitionSpec):
         self._scan_axis = scan_axis
+        self._axis_error = axis_error
         self.spec = spec
     
     @cached_property
@@ -98,6 +99,22 @@ class RectangularFieldStagePositionHelper:
             return units.Position(self.spec.x_range.min + relative_position)
         else:
             return units.Position(self.spec.y_range.min + relative_position)
+        
+    def web_min(self, strip_index: int) -> units.Position:
+        shear = (self.scan_center(strip_index) - self.scan_center(self.n_strips//2)) \
+            * float(self._axis_error)
+        if self._scan_axis == "x":
+            return units.Position(self.spec.y_range.min) - shear
+        else:
+            return units.Position(self.spec.x_range.min) - shear
+
+    def web_max(self, strip_index: int) -> units.Position:
+        shear = (self.scan_center(strip_index) - self.scan_center(self.n_strips//2)) \
+            * float(self._axis_error)
+        if self._scan_axis == "x":
+            return units.Position(self.spec.y_range.max) - shear
+        else:
+            return units.Position(self.spec.x_range.max) - shear
 
     @cached_property
     def n_strips(self) -> int:
@@ -141,7 +158,8 @@ class StripBaseAcquisition(Acquisition, ABC):
             self._web_axis_stage = self.hw.stage.x
 
         self.positioner = RectangularFieldStagePositionHelper(
-            scan_axis=self._line_acquisition.axis,
+            scan_axis=self.system_config.fast_raster_scanner['axis'],
+            axis_error=self.hw.laser_scanning_optics.stage_scanner_angle,
             spec=spec
         )
 
@@ -196,7 +214,7 @@ class StripBaseAcquisition(Acquisition, ABC):
         # start line acquisition
         self._line_acquisition.start() 
         while not self._line_acquisition.active.is_set():
-            time.sleep(0.001) # spin until active (indicates data acquiring)
+            time.sleep(0.001) # wait (active event indicates data is acquiring)
 
         # If slow raster scanner present, park in
         if self.hw.slow_raster_scanner:
@@ -227,8 +245,6 @@ class StripBaseAcquisition(Acquisition, ABC):
 
                 # wait for web axis movement to come to complete stop
                 self._web_axis_stage.wait_until_move_finished()
-
-                # TODO, call some sort of line acquisition reset
 
         finally:
             # Stop the line acquisition worker
@@ -272,7 +288,6 @@ class PointScanLineAcquisition(LineAcquisition):
     Customized LineAcquisition that starts linear position measurement 
     (encoders) and allows measuring them by overriding the read_position method.
     """
-
     def __init__(self, hw, system_config, spec: LineAcquisitionSpec):
         super().__init__(hw, system_config, spec)
 

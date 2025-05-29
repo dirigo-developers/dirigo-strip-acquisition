@@ -9,6 +9,8 @@ from dirigo.sw_interfaces import Logger
 from dirigo_strip_acquisition.processors import TileBuilder, TileProduct
 from dirigo_strip_acquisition.acquisitions import StripBaseAcquisition
 
+
+
 sig = [types.int16[:,:,:](types.int16[:,:,:], types.int64)]
 @njit(sig, parallel=True, fastmath=True, cache=True)
 def _downsample(tile: np.ndarray, f: int) -> np.ndarray:
@@ -52,6 +54,13 @@ class PyramidLogger(Logger):
             photometric='minisblack',
             planarconfig='contig',
         )
+        self._metadata={
+            'PhysicalSizeX': float(self._acq.spec.pixel_size),
+            'PhysicalSizeXUnit': 'm',
+            'PhysicalSizeY': float(self._acq.spec.pixel_size),
+            'PhysicalSizeYUnit': 'm',
+            'Channel': {'Name': ['Channel 1', 'Channel 2']}, # TODO, rename these out of system config
+        }
         
         self._ds_tiles = []
         for d in self._levels[1:]:
@@ -86,7 +95,7 @@ class PyramidLogger(Logger):
                 # yield full resolution data 
                 yield tile.data  
 
-    def _ds_tiles_gen(self, level_idx) -> Iterator[np.ndarray]:
+    def _downsampled_tiles_gen(self, level_idx) -> Iterator[np.ndarray]:
         ds_tiles: np.ndarray = self._ds_tiles[level_idx]
         tile_idx = 0
 
@@ -100,27 +109,29 @@ class PyramidLogger(Logger):
                                
     def run(self):
         try:
-            with tifffile.TiffWriter(self._file, bigtiff=True) as tif:
-                tif.write(
-                    self._tiles_gen(),
-                    shape=self._shape,
-                    subifds=len(self._levels) - 1,
-                    **self._options
-                )
-
-                # write downsampled levels
-                for level_idx, f in enumerate(self._levels[1:]):
-                    d_h, d_w = math.ceil(self._shape[0] / f), math.ceil(self._shape[1] / f)
-                    tif.write(
-                        self._ds_tiles_gen(level_idx),
-                        shape=(d_h, d_w, self._n_channels),
-                        subfiletype=1,
-                        **self._options
-                    )
+            self.save_data()
         
         finally:
             self.publish(None)
             print("Image write complete")
 
-    def save_data(self, data):
-        pass
+    def save_data(self):
+
+        with tifffile.TiffWriter(self._file, bigtiff=True) as tif:
+            tif.write(
+                self._tiles_gen(),
+                shape=self._shape,
+                subifds=len(self._levels) - 1,
+                metadata=self._metadata,
+                **self._options
+            )
+
+            # write downsampled levels
+            for level_idx, f in enumerate(self._levels[1:]):
+                d_h, d_w = math.ceil(self._shape[0] / f), math.ceil(self._shape[1] / f)
+                tif.write(
+                    self._downsampled_tiles_gen(level_idx),
+                    shape=(d_h, d_w, self._n_channels),
+                    subfiletype=1,
+                    **self._options
+                )
