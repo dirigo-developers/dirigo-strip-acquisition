@@ -3,12 +3,14 @@ from functools import cached_property
 from pathlib import Path
 import math
 import time
+import threading
 from typing import Optional
+from dataclasses import dataclass
 
-from platformdirs import user_config_dir
 import numpy as np
 
-from dirigo import units
+from dirigo import units, io
+from dirigo.components.hardware import Hardware
 from dirigo.sw_interfaces.acquisition import Acquisition, AcquisitionProduct
 from dirigo.plugins.acquisitions import LineAcquisition, LineAcquisitionSpec
 from dirigo.hw_interfaces.digitizer import Digitizer
@@ -16,7 +18,7 @@ from dirigo.hw_interfaces.scanner import FastRasterScanner
 from dirigo.hw_interfaces.illuminator import Illuminator
 from dirigo.hw_interfaces.camera import LineScanCamera
 from dirigo.hw_interfaces.stage import MultiAxisStage
-from dirigo.hw_interfaces.encoder import MultiAxisLinearEncoder
+from dirigo.hw_interfaces.encoder import MultiAxisLinearEncoder, LinearEncoder
 
 from dirigo_e2v_line_scan_camera.dirigo_e2v_line_scan_camera import TriggerModes # TODO eliminate need for this
 
@@ -51,13 +53,17 @@ class StripAcquisitionSpec(LineAcquisitionSpec):
         Create a spec object for strip scan. 
         """
         if "buffers_per_acquisition" not in kwargs:
-            kwargs["buffers_per_acquisition"] = float('inf')
-        super().__init__(**kwargs)
-
+            kwargs["buffers_per_acquisition"] = -1 # -1 codes for unlimited
+        
         self.x_range = units.PositionRange(**x_range)
         self.y_range = units.PositionRange(**y_range)
-
-        self.pixel_height = self.pixel_size # constrain to square pixel
+       
+        if "lines_per_buffer" not in kwargs:
+            # kwargs["lines_per_buffer"] = round(self.x_range.range  # TODO, allow web/scan axis switch
+            #                                    / units.Position(kwargs["pixel_size"]))
+            kwargs["lines_per_buffer"] = -1
+        super().__init__(**kwargs)
+        self.pixel_height = self.pixel_size # force square pixel
 
         if not (0 <= strip_overlap < 1):
             raise ValueError(f"`overlap` must be a float between 0 and 1")
@@ -136,26 +142,24 @@ class StripBaseAcquisition(Acquisition, ABC):
     field. Define 'scan axis' as the axis parallel to the acquired lines. Define
     'web axis' as perpendicular to scan axis.
 
-    Concrete subclasses need to define REQUIRED_RESOURCES, SPEC_LOCATION, 
-    SPEC_OBJECT, and provide a method of setup_line_acquisition()
+    Concrete subclasses need to define required_resources, spec_location, 
+    Spec, and provide a method for setup_line_acquisition()
     """
     
     def __init__(self, hw, system_config, spec: StripAcquisitionSpec):
         super().__init__(hw, system_config, spec)
         self.spec: StripAcquisitionSpec
 
-        # set up internal line acquisition
-        # shares hw, and spec (internal _stop_event is not shared)
-        self.setup_line_acquisition(hw, system_config, spec)
-        self._line_acquisition: 'PointScanLineAcquisition' | 'LineScanCameraLineAcquisition'
+        # set up internal line acquisition        
+        self._line_acquisition = self.setup_line_acquisition()
 
         # define functional axes
         if self._line_acquisition.axis == 'x':
-            self._scan_axis_stage = self.hw.stage.x
-            self._web_axis_stage = self.hw.stage.y # web axis = perpendicular to the fast raster scanner / line-scan camera axis
+            self._scan_axis_stage = self.hw.stages.x
+            self._web_axis_stage = self.hw.stages.y # web axis = perpendicular to the fast raster scanner / line-scan camera axis
         else:
-            self._scan_axis_stage = self.hw.stage.y
-            self._web_axis_stage = self.hw.stage.x
+            self._scan_axis_stage = self.hw.stages.y
+            self._web_axis_stage = self.hw.stages.x
 
         self.positioner = RectangularFieldStagePositionHelper(
             scan_axis=self.system_config.fast_raster_scanner['axis'],
@@ -188,7 +192,7 @@ class StripBaseAcquisition(Acquisition, ABC):
         
 
     @abstractmethod
-    def setup_line_acquisition(self):
+    def setup_line_acquisition(self) -> "PointScanLineAcquisition | LineScanCameraLineAcquisition":
         pass
 
     def add_subscriber(self, subscriber):
@@ -328,13 +332,16 @@ class PointScanLineAcquisition(LineAcquisition):
 
 
 class PointScanStripAcquisition(StripBaseAcquisition):
-    REQUIRED_RESOURCES = [Digitizer, FastRasterScanner, MultiAxisStage] 
-    SPEC_LOCATION: str = Path(user_config_dir("Dirigo")) / "acquisition/point_scan_strip"
-    SPEC_OBJECT = StripAcquisitionSpec
+    required_resources = [Digitizer, FastRasterScanner, MultiAxisStage]
+    SPEC_LOCATION: Path = io.config_path() / "acquisition/point_scan_strip"
+    Spec = StripAcquisitionSpec
 
-    def setup_line_acquisition(self, hw, system_config, spec):
-        self._line_acquisition = PointScanLineAcquisition(hw, system_config, spec)
+    def setup_line_acquisition(self):
+        return PointScanLineAcquisition(self.hw, self.system_config, self.spec)
 
+@dataclass
+class CameraAcquisitionRuntimeInfo:
+    pass
 
 """
 LineScanCameraLineAcquisition and LineScanCameraStripAcquisition provides a 
@@ -342,30 +349,36 @@ concrete implementation for strip scanning areas using a line-scan camera.
 
 A position encoder task provides an external trigger to the camera.
 """
-
 class LineScanCameraLineAcquisition(Acquisition):
     """
     Customized LineAcquisition that starts an encoder-derived trigger task to
     linearize the camera acquisitions.
     """
-    REQUIRED_RESOURCES = [LineScanCamera, Illuminator, MultiAxisLinearEncoder]
+    required_resources = [LineScanCamera, Illuminator, MultiAxisLinearEncoder]
 
-    def __init__(self, hw, spec):
-        super().__init__(hw, spec) # sets up thread, inbox, stores hw, checks resources
+    def __init__(self, hw, system_config, spec):
+        super().__init__(hw, system_config, spec) # sets up thread, inbox, stores hw, checks resources
         self.spec: StripAcquisitionSpec
+        self.active = threading.Event()  # to indicate data acquisition occuring
 
         # Set line camera properties
         self.configure_camera()
 
         # get reference to the encoder channel perpendicular the line-scan camera axis
         if self.hw.line_scan_camera.axis == 'y':
+            if self.hw.encoders.x is None:
+                raise RuntimeError("Encoder not initialized")
             self._encoder = self.hw.encoders.x
             self._lines_per_strip = round(self.spec.x_range.range / self.spec.pixel_height)
         else:
+            if self.hw.encoders.y is None:
+                raise RuntimeError("Encoder not initialized")
             self._encoder = self.hw.encoders.y
             self._lines_per_strip = round(self.spec.y_range.range / self.spec.pixel_height)
 
         self.hw.frame_grabber.prepare_buffers(nbuffers=self._lines_per_strip) # TODO may not want to allocate all lines here
+
+        self.runtime_info = CameraAcquisitionRuntimeInfo()
 
     @property
     def axis(self) -> str:
@@ -388,12 +401,19 @@ class LineScanCameraLineAcquisition(Acquisition):
         self.hw.frame_grabber.roi_width = roi_width
 
         self.hw.frame_grabber.roi_left = (self.hw.frame_grabber.pixels_width - roi_width) // 2
-        
+    
+    def _get_free_product(self) -> AcquisitionProduct:
+        return super()._get_free_product() # type: ignore
 
     def run(self):
+        # Set up acquisition buffer pool
+        shape = (self._lines_per_strip, self.hw.frame_grabber.roi_width, 1)
+        self.init_product_pool(n=1, shape=shape, dtype=np.uint16) # TODO, switch between 8/16 bit, RGB/mono
+
         self.hw.illuminator.turn_on()
 
         self.hw.frame_grabber.start()
+        self.active.set()
         self._encoder.start_triggering(self.spec.pixel_height)
 
         try:
@@ -406,18 +426,23 @@ class LineScanCameraLineAcquisition(Acquisition):
 
             # confirm we got em all
             print("final acquired count:", self.hw.frame_grabber.buffers_acquired)
-            superbuffer = self.hw.frame_grabber.get_next_completed_superbuffer()
+            superbuffer = self.hw.frame_grabber.get_next_completed_superbuffer() # type: ignore
             
             if superbuffer.shape[1] == 1:
                 # Remove the singleton lines dimension, since each sub-buffer is 1-line
                 superbuffer = np.squeeze(superbuffer, axis=1)
+            
+            # if self._encoder._timestamp_trigger_events: # type: ignore
+            #     timestamps = self._encoder.read_timestamps(
+            #         self.hw.frame_grabber.buffers_acquired - 1
+            #     )
+            # else:
+            #     timestamps = None
 
-            self.publish(AcquisitionProduct(
-                data=superbuffer,
-                timestamps=np.array(
-                    self._encoder.read_timestamps(self.hw.frame_grabber.buffers_acquired-1)
-                )
-            ))
+            product = self._get_free_product()
+            product.data = superbuffer
+            #product.timestamps = np.array(timestamps)
+            self._publish(product)
 
         finally:
             self.cleanup()
@@ -428,13 +453,13 @@ class LineScanCameraLineAcquisition(Acquisition):
         self.hw.frame_grabber.stop()
 
         # Put None into queue to signal finished, stop scanning
-        self.publish(None)
+        self._publish(None)
 
 
 class LineScanCameraStripAcquisition(StripBaseAcquisition):
-    REQUIRED_RESOURCES = [LineScanCamera, Illuminator, MultiAxisStage] 
-    SPEC_LOCATION: str = Path(user_config_dir("Dirigo")) / "acquisition/line_scan_camera_strip"
-    SPEC_OBJECT = StripAcquisitionSpec
+    required_resources = [LineScanCamera, Illuminator, MultiAxisStage]
+    spec_location = io.config_path() / "acquisition/line_scan_camera_strip"
+    Spec = StripAcquisitionSpec
 
-    def setup_line_acquisition(self, hw, system_config, spec):
-        self._line_acquisition = LineScanCameraLineAcquisition(hw, system_config, spec)
+    def setup_line_acquisition(self):
+        return LineScanCameraLineAcquisition(self.hw, self.system_config, self.spec)
