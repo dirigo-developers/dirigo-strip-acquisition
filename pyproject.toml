@@ -13,11 +13,11 @@ license = {text = "MIT"}
 dependencies = []
 
 [project.entry-points."dirigo_acquisitions"]
-point_scan_strip = "dirigo_strip_acquisition:PointScanStripAcquisition"
-line_scan_camera_strip = "dirigo_strip_acquisition:LineScanCameraStripAcquisition"
+raster_scan_stitched = "dirigo_strip_acquisition:RasterScanStitchedAcquisition"
+line_camera_stitched = "dirigo_strip_acquisition:LineCameraStitchedAcquisition"
 
 [project.entry-points."dirigo_processors"]
-point_scan_strip = "dirigo_strip_acquisition:StripProcessor"
+strip = "dirigo_strip_acquisition:StripProcessor"
 strip_stitcher = "dirigo_strip_acquisition:StripStitcher"
 tile_builder = "dirigo_strip_acquisition:TileBuilder"
 

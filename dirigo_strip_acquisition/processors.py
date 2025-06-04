@@ -1,16 +1,22 @@
+from functools import cached_property
 import math
+from typing import Optional
 
-from platformdirs import user_config_path
-import tifffile
 from numba import njit, prange, int16, float64, int64, boolean
 import numpy as np
+from numpy.polynomial.polynomial import Polynomial
 
-from dirigo import units
-from dirigo.sw_interfaces.worker import Product
+from dirigo import units, io
+from dirigo.sw_interfaces.worker import Product, EndOfStream
+from dirigo.sw_interfaces.acquisition import Acquisition, AcquisitionProduct
 from dirigo.sw_interfaces.processor import Processor, ProcessorProduct
-from dirigo.plugins.processors import RasterFrameProcessor  
-from dirigo_strip_acquisition import StripAcquisitionSpec
-from dirigo_strip_acquisition.acquisitions import StripBaseAcquisition
+from dirigo.plugins.processors import RasterFrameProcessor, resample_kernel
+
+from dirigo_strip_acquisition.acquisitions import (
+    RasterScanStitchedAcquisitionSpec, LineCameraStitchedAcquisitionSpec,
+    RasterScanStitchedAcquisition, LineCameraStitchedAcquisition
+
+)
 
 """
 Expected limitations:
@@ -60,13 +66,13 @@ def _line_placement_kernel(strip: np.ndarray,     # dim order (web, scan, chan)
     return int(round(positions[lines.shape[0]-1, 0] / pixel_size))
 
 
-class StripProcessor(Processor):
+class StripProcessor(Processor[RasterFrameProcessor]):
     """  """
     def __init__(self, upstream: RasterFrameProcessor):
         super().__init__(upstream)
 
-        self._spec: StripAcquisitionSpec
-        self._acq: StripBaseAcquisition # or loader
+        self._spec: RasterScanStitchedAcquisitionSpec | LineCameraStitchedAcquisitionSpec
+        self._acq: RasterScanStitchedAcquisition | LineCameraStitchedAcquisition
         self._system_config = self._acq.system_config
         self._data_range = upstream.data_range
         self._positioner = self._acq.positioner 
@@ -85,16 +91,17 @@ class StripProcessor(Processor):
         self._strip_idx = 0
         self._prev_row = -1 # increments as _line_placement_kernel is called
 
+    def _receive_product(self) -> ProcessorProduct:
+        return super()._receive_product() # type: ignore
+    
     def run(self):
         try:
-            strip = self.get_free_product()
+            strip = self._get_free_product()
             strip.data[...] = 0 # TODO, check performance impact of this
 
             while True:
-                frame: ProcessorProduct = self.inbox.get()
-                if frame is None: return
+                with self._receive_product() as frame:
 
-                with frame:
                     p = np.array(frame.positions)
                     # note: p is actually the 2nd position of the current frame
                     # up to (and including) the first position of the NEXT frame
@@ -107,7 +114,7 @@ class StripProcessor(Processor):
                     elif self._system_config.fast_raster_scanner['axis'] == "y":
                         p = p[:,:2] 
 
-                    if self._spec.bidirectional_scanning:
+                    if self._spec.bidirectional_scanning:           # TODO move this interpolation out to Acquisition class
                         # interpolate (bidi-scanning expect 1:2 positions:lines)
                         p1 = np.concatenate(
                             (self._prev_position[np.newaxis,:], p[:-1,:]),
@@ -152,10 +159,10 @@ class StripProcessor(Processor):
                     if latest_strip_idx == self._strip_idx + 1:
                         # Moving to next strip, publish
                         print(f"Publishing strip {self._strip_idx} with size: {strip.data.shape}")
-                        self.publish(strip)
+                        self._publish(strip)
                         self._strip_idx += 1
 
-                        strip = self.get_free_product()
+                        strip = self._get_free_product()
                         strip.data[...] = 0 # TODO, remove this if we can ensure complete overwrite of previous data
 
                         # add any leftover lines to new strip
@@ -178,10 +185,10 @@ class StripProcessor(Processor):
         finally:
             # publish final strip (completed or not)
             print(f"Publishing FINAL strip {self._strip_idx} with size: {strip.data.shape}")
-            self.publish(strip)
+            self._publish(strip)
 
             # send shutdown sentinel
-            self.publish(None)
+            self._publish(None)
     
     @property
     def data_range(self) -> units.IntRange:
@@ -204,41 +211,44 @@ def _linear_blend(strip_a: np.ndarray, strip_b: np.ndarray, overlap_px: int):
         strip_b[:, :w,  :] = blended
 
 
-class StripStitcher(Processor):
+class StripStitcher(Processor[StripProcessor]):
     def __init__(self, upstream: StripProcessor):
         super().__init__(upstream)
         self._data_range = upstream.data_range
 
-        self._spec: StripAcquisitionSpec
+        self._spec: RasterScanStitchedAcquisitionSpec | LineCameraStitchedAcquisitionSpec
         self._overlap_pixels = round(self._spec.strip_overlap * self._spec.pixels_per_line)
         self._prev_strip = None
 
+    def _receive_product(self) -> ProcessorProduct:
+        return super()._receive_product() # type: ignore
+
     def run(self):
-        while True:
-            strip_product: ProcessorProduct = self.inbox.get()
-            if strip_product is None: # sentinel coding for finished
-                # shutdown sequence: flush the very last strip, propagate None
-                if self._prev_strip is not None:
-                    self.publish(self._prev_strip)
-                self.publish(None)
-                return
+        try:
+            while True:
+                with self._receive_product() as strip_product:
 
-            if self._prev_strip is None:
-                # we need one more strip to start blending
-                self._prev_strip = strip_product
-                continue
+                    if self._prev_strip is None:
+                        # we need one more strip to start blending
+                        self._prev_strip = strip_product
+                        continue
 
-            _linear_blend(self._prev_strip.data,
-                         strip_product.data,
-                         self._overlap_pixels)
-            
-            with self._prev_strip:
-                self.publish(self._prev_strip)
-                # publish increments product._remaining
-                # exiting context manager decrements product._remaining
-                # for 1 subscriber, net = 0; product not returned to pool
+                    _linear_blend(self._prev_strip.data,
+                                strip_product.data,
+                                self._overlap_pixels)
+                    
+                    with self._prev_strip:
+                        self._publish(self._prev_strip)
+                        # publish increments product._remaining
+                        # exiting context manager decrements product._remaining
+                        # for 1 subscriber, net = 0; product not returned to pool
 
-            self._prev_strip = strip_product
+                    self._prev_strip = strip_product
+
+        finally:
+            if self._prev_strip is not None:
+                self._publish(self._prev_strip)
+            self._publish(None)
 
     @property
     def data_range(self) -> units.IntRange:
@@ -292,18 +302,18 @@ class TileProduct(Product):
     def __init__(self, 
                  pool, 
                  data: np.ndarray,
-                 tile_coords: tuple = None):
+                 tile_coords: Optional[tuple] = None):
         super().__init__(pool)
         self.data = data
         self.coords = tile_coords
 
 
-class TileBuilder(Processor):
-
+class TileBuilder(Processor[StripStitcher]):
+    """Parcels up tiles to send to file logger."""
     def __init__(self, upstream: StripStitcher, tile_shape=(512,512)):
         super().__init__(upstream)
-        self._acq: StripBaseAcquisition
-        self._spec: StripAcquisitionSpec
+        self._acq: RasterScanStitchedAcquisition | LineCameraStitchedAcquisition
+        self._spec: RasterScanStitchedAcquisitionSpec | LineCameraStitchedAcquisitionSpec
 
         if tile_shape[0] != tile_shape[1]:
             raise ValueError("Tile shape must be square")
@@ -317,7 +327,10 @@ class TileBuilder(Processor):
         self._tiles_web  = math.ceil(self._acq.final_shape[1] / tile_shape[0]) # tiles along the web dimension (strip long axis)
         self._tiles_scan = math.ceil(self._acq.final_shape[0] / tile_shape[0]) # tiles along the scan dimension (strip short axis)
         
-        self._leftovers = None
+        self._leftovers: Optional[np.ndarray] = None
+
+    def _receive_product(self) -> ProcessorProduct:
+        return super()._receive_product() # type: ignore
         
     def run(self):
         tile_idx = 0
@@ -328,71 +341,72 @@ class TileBuilder(Processor):
             self._spec.pixels_per_line * (1-self._spec.strip_overlap)
         )
 
-        while True:
-            strip: ProcessorProduct = self.inbox.get()
-            if strip is None: 
-                self.publish(None) # send sentinel None
-                return
+        try:
+            while True:
+                with self._receive_product() as strip:
 
-            with strip:
-                while True:
-                    # What range does this cover?
-                    t_w = tile_idx %  self._tiles_web # tile coordinate web dim
-                    t_s = tile_idx // self._tiles_web # tile coordinate scan dim
+                    while True:
+                        t_w = tile_idx %  self._tiles_web # tile coordinate web dim
+                        t_s = tile_idx // self._tiles_web # tile coordinate scan dim
 
-                    if t_s >= self._tiles_scan: 
-                        self.publish(None) # send sentinel None
-                        return
-                    
-                    w = t_w * tile_shape[0]   # web dim global pixel coordinate
-                    s = t_s * tile_shape[1]   # scan dim global pixel coordinate
-                    scan_offset = strip_idx * effective_pixels_per_line 
+                        if t_s >= self._tiles_scan: 
+                            raise EndOfStream
+                        
+                        w = t_w * tile_shape[0]   # web dim global pixel coordinate
+                        s = t_s * tile_shape[1]   # scan dim global pixel coordinate
+                        scan_offset = strip_idx * effective_pixels_per_line 
 
-                    s_o = s - scan_offset   # scan pixel coordinate relative to the current strip
-                    
-                    if (s_o + tile_shape[1]) > strip.data.shape[1]:
-                        # If the next tile exceeds current strip dimensions, 
-                        # store leftovers and break to move on to next strip
-                        self._leftovers = strip.data[:, s_o:, :].copy()
-                        strip_idx += 1
-                        break
+                        s_o = s - scan_offset   # scan pixel coordinate relative to the current strip
+                        
+                        if (s_o + tile_shape[1]) > strip.data.shape[1]:
+                            # If the next tile exceeds current strip dimensions, 
+                            # store leftovers and break to move on to next strip
+                            self._leftovers = strip.data[:, s_o:, :].copy()
+                            strip_idx += 1
+                            break
 
-                    tile = self.get_free_product()
-                    tile.coords = (t_s, t_w)
-                    tile.data[...] = 0      # clear old tile data                   
+                        tile = self.get_free_product()
+                        tile.coords = (t_s, t_w)
+                        tile.data[...] = 0      # clear old tile data                   
 
-                    if s_o >= 0:
-                        # tile fully within current strip, copy into tile object
-                        data = strip.data[
-                            w : min(w + self._tile_shape[0], strip.data.shape[0]),
-                            s_o : min(s_o + self._tile_shape[1], strip.data.shape[1]),
-                            :
-                        ]
-                        tile.data[:data.shape[0], :data.shape[1], :] = data
-                    else:   # tile stradles previous strip and the current strip
-                        # copy data from leftovers
-                        data1 = self._leftovers[
-                            w : min(w + self._tile_shape[0], self._leftovers.shape[0]),
-                            :, :
-                        ]
-                        tile.data[:data1.shape[0], :data1.shape[1], :] = data1
+                        if s_o >= 0:
+                            # tile fully within current strip, copy into tile object
+                            data = strip.data[
+                                w : min(w + self._tile_shape[0], strip.data.shape[0]),
+                                s_o : min(s_o + self._tile_shape[1], strip.data.shape[1]),
+                                :
+                            ]
+                            tile.data[:data.shape[0], :data.shape[1], :] = data
+                        else:   # tile stradles previous strip and the current strip
+                            # copy data from leftovers
+                            if self._leftovers is None:
+                                raise RuntimeError("Leftovers not initialized")
+                            data1 = self._leftovers[
+                                w : min(w + self._tile_shape[0], self._leftovers.shape[0]),
+                                :, :
+                            ]
+                            tile.data[:data1.shape[0], :data1.shape[1], :] = data1
 
-                        # copy data from current strip
-                        data2 = strip.data[
-                            w : min(w + self._tile_shape[0], self._leftovers.shape[0]),
-                            :(self._tile_shape[1] + s_o),
-                            :
-                        ]
-                        tile.data[:data2.shape[0], -data2.shape[1]:, :] = data2
-                    
-                    if self._acq.system_config.fast_raster_scanner['axis'] == "x":
-                        _transpose_inplace(tile.data)
-                        #_rotate90_inplace(tile.data, False)
+                            # copy data from current strip
+                            data2 = strip.data[
+                                w : min(w + self._tile_shape[0], self._leftovers.shape[0]),
+                                :(self._tile_shape[1] + s_o),
+                                :
+                            ]
+                            tile.data[:data2.shape[0], -data2.shape[1]:, :] = data2
+                        
+                        if self._acq.system_config.fast_raster_scanner['axis'] == "x":
+                            _transpose_inplace(tile.data)
+                            #_rotate90_inplace(tile.data, False)
 
-                    #print(f"Publishing tile {tile_idx}: ({t_s},{t_w}), shape: {tile.data.shape}, dtype: {tile.data.dtype}")
-                    self.publish(tile)
-                    tile_idx += 1
+                        #print(f"Publishing tile {tile_idx}: ({t_s},{t_w}), shape: {tile.data.shape}, dtype: {tile.data.dtype}")
+                        self._publish(tile)
+                        tile_idx += 1
+        except EndOfStream:
+            self._publish(None)
 
+        finally:
+            self._publish(None)
 
     def init_product_pool(self, n, shape, dtype):
         for _ in range(n):
@@ -408,3 +422,4 @@ class TileBuilder(Processor):
     @property
     def data_range(self) -> units.IntRange:
         return self._data_range
+

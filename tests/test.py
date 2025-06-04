@@ -3,20 +3,13 @@ from dirigo.main import Dirigo
 
 diri = Dirigo()
     
-acquisition = diri.acquisition_factory('line_scan_camera_strip')
-display = diri.display_factory(acquisition=acquisition)
-logging = diri.logger_factory(acquisition=acquisition)
+acquisition     = diri.make_acquisition("line_camera_stitched", spec="line_camera")
+line_processor  = diri.make_processor("line_camera_line", upstream=acquisition)
+strip_processor = diri.make_processor("strip", upstream=line_processor)
+# raw_logger  = diri.make_logger("tiff", upstream=acquisition)
+# raw_logger.frames_per_file = 100
 
-# Connect workers
-acquisition.add_subscriber(display)
-acquisition.add_subscriber(logging)
-
-# start workers
-display.start()
-logging.start()
 acquisition.start()
-
 acquisition.join(timeout=100.0)
-display.stop()
 
 print("Acquisition complete")

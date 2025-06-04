@@ -16,7 +16,7 @@ from dirigo.plugins.loggers import TiffLogger
 from dirigo.plugins.processors import RasterFrameProcessor
 from dirigo.plugins.loaders import deserialize_float64_list
 from dirigo_strip_acquisition.acquisitions import (
-    StripAcquisitionSpec, RectangularFieldStagePositionHelper
+    StitchedStripAcquisitionSpec, RectangularFieldStagePositionHelper
 )
 from dirigo_strip_acquisition.processors import StripProcessor, StripStitcher, TileBuilder
 from dirigo_strip_acquisition.loggers import PyramidLogger
@@ -44,7 +44,7 @@ class StripAcquisitionLoader(Loader):
             self.runtime_info = LineAcquisitionRuntimeInfo.from_dict(runtime_dict)
 
             spec_dict = json.loads(tags[TiffLogger.ACQUISITION_SPEC_TAG].value)
-            self.spec = StripAcquisitionSpec(**spec_dict)
+            self.spec = StitchedStripAcquisitionSpec(**spec_dict)
 
             digi_dict = json.loads(tags[TiffLogger.DIGITIZER_PROFILE_TAG].value)
             self.digitizer_profile = DigitizerProfile.from_dict(digi_dict)

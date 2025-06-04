@@ -1,6 +1,6 @@
 from dirigo_strip_acquisition.acquisitions import (
-    StripAcquisitionSpec, LineScanCameraStripAcquisition, 
-    PointScanStripAcquisition
+    RasterScanStitchedAcquisitionSpec, RasterScanStitchedAcquisition, 
+    LineCameraStitchedAcquisitionSpec, LineCameraStitchedAcquisition
 )
 from dirigo_strip_acquisition.processors import (
     StripProcessor, StripStitcher, TileBuilder
@@ -8,8 +8,8 @@ from dirigo_strip_acquisition.processors import (
 from dirigo_strip_acquisition.loggers import PyramidLogger
 
 __all__ = [
-    'StripAcquisitionSpec', 'LineScanCameraStripAcquisition', 
-    'PointScanStripAcquisition', 'StripProcessor', 'StripStitcher', 
-    'TileBuilder',
+    'RasterScanStitchedAcquisitionSpec', 'RasterScanStitchedAcquisition', 
+    'LineCameraStitchedAcquisitionSpec', 'LineCameraStitchedAcquisition',
+    'StripProcessor', 'StripStitcher', 'TileBuilder',
     'PyramidLogger'
 ]

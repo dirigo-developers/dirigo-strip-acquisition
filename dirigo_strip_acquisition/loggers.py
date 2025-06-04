@@ -7,7 +7,7 @@ from numba import njit, prange, types
 
 from dirigo.sw_interfaces import Logger
 from dirigo_strip_acquisition.processors import TileBuilder, TileProduct
-from dirigo_strip_acquisition.acquisitions import StripBaseAcquisition
+from dirigo_strip_acquisition.acquisitions import StitchedAcquisition
 
 
 
@@ -39,7 +39,7 @@ class PyramidLogger(Logger):
 
     def __init__(self, upstream: TileBuilder, levels: tuple = (1, 2, 8)):
         super().__init__(upstream)
-        self._acq: StripBaseAcquisition
+        self._acq: StitchedStripAcquisition
         
         self._file       = self.save_path / f"{self.basename}.ome.tif"
         self._n_channels = upstream._n_channels
@@ -74,26 +74,32 @@ class PyramidLogger(Logger):
             tiles = np.zeros(shape, dtype=self._dtype)
             self._ds_tiles.append(tiles)
 
+    def _receive_product(self) -> TileProduct:
+        return super()._receive_product() # type: ignore
+
     def _tiles_gen(self) -> Iterator[np.ndarray]:
         """Yield tile data, blocking on queue."""
-        while True:
-            tile: TileProduct = self.inbox.get()
-            if tile is None: return     # finished sentinel
+        try:
+            while True:
+                with self._receive_product() as tile:
+                    # downsample & store into levels
+                    if tile.coords is None:
+                        raise RuntimeError("Tile coordinates not initialized")
+                    for level_idx, f in enumerate(self._levels[1:]):
+                        di = tile.coords[0] // f
+                        dj = tile.coords[1] // f
+                        i0 = int( (tile.coords[0] / f - di) * self._tile_shape[0] )
+                        j0 = int( (tile.coords[1] / f - dj) * self._tile_shape[1] )
+                        i1 = i0 + self._tile_shape[0] // f
+                        j1 = j0 + self._tile_shape[1] // f
+                        self._ds_tiles[level_idx][di, dj, i0:i1, j0:j1 , :] = \
+                            _downsample(tile.data, f) # TODO branch here to use prev downsampled data
 
-            with tile: 
-                # downsample & store into levels
-                for level_idx, f in enumerate(self._levels[1:]):
-                    di = tile.coords[0] // f
-                    dj = tile.coords[1] // f
-                    i0 = int( (tile.coords[0] / f - di) * self._tile_shape[0] )
-                    j0 = int( (tile.coords[1] / f - dj) * self._tile_shape[1] )
-                    i1 = i0 + self._tile_shape[0] // f
-                    j1 = j0 + self._tile_shape[1] // f
-                    self._ds_tiles[level_idx][di, dj, i0:i1, j0:j1 , :] = \
-                        _downsample(tile.data, f) # TODO branch here to use prev downsampled data
+                    # yield full resolution data 
+                    yield tile.data  
 
-                # yield full resolution data 
-                yield tile.data  
+        finally:
+            self._publish(None)
 
     def _downsampled_tiles_gen(self, level_idx) -> Iterator[np.ndarray]:
         ds_tiles: np.ndarray = self._ds_tiles[level_idx]
@@ -112,7 +118,7 @@ class PyramidLogger(Logger):
             self.save_data()
         
         finally:
-            self.publish(None)
+            self._publish(None)
             print("Image write complete")
 
     def save_data(self):
@@ -123,7 +129,7 @@ class PyramidLogger(Logger):
                 shape=self._shape,
                 subifds=len(self._levels) - 1,
                 metadata=self._metadata,
-                **self._options
+                **self._options # type: ignore
             )
 
             # write downsampled levels
@@ -133,5 +139,5 @@ class PyramidLogger(Logger):
                     self._downsampled_tiles_gen(level_idx),
                     shape=(d_h, d_w, self._n_channels),
                     subfiletype=1,
-                    **self._options
+                    **self._options # type: ignore
                 )
