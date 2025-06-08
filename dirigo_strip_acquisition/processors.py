@@ -86,8 +86,11 @@ class StripProcessor(Processor[RasterFrameProcessor]):
             self._spec.pixels_per_line,
             self._acq.final_shape[2]
         )
-        dtype = self._acq.data_acquisition_device.data_range.recommended_dtype
-        self.init_product_pool(n=4, shape=self._strip_shape, dtype=dtype)
+        if self._acq.data_acquisition_device.data_range.recommended_dtype in {np.uint8, np.uint16}:
+            dt = np.uint16
+        else:
+            dt = np.int16
+        self.init_product_pool(n=4, shape=self._strip_shape, dtype=dt)
         
         self._strip_idx = 0
         self._prev_row = -1 # increments as _line_placement_kernel is called

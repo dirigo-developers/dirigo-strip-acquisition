@@ -134,8 +134,8 @@ class LineCameraStripAcquisition(LineCameraLineAcquisition):
         self._n_positions_read = 0
 
         # TODO legitamize this hack
-        self.hw.encoders.x._sample_clock_channel = "/Dev1/PFI11"
-        self.hw.encoders.y._sample_clock_channel = "/Dev1/PFI11"
+        self.hw.encoders.x._sample_clock_channel = self.hw.encoders.x._trigger_channel
+        self.hw.encoders.y._sample_clock_channel = self.hw.encoders.x._trigger_channel
         self.hw.encoders.x._timestamp_trigger_events = True
 
     # property: axis defined in super class
@@ -305,6 +305,7 @@ class StitchedAcquisition(Acquisition, ABC):
 
                 # wait for web axis movement to come to complete stop
                 self._web_axis_stage.wait_until_move_finished()
+                print("finished")
 
         finally:
             # Stop the line acquisition Worker
