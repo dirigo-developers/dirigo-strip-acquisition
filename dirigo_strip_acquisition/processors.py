@@ -1,16 +1,14 @@
-from functools import cached_property
 import math
 from typing import Optional
 
-from numba import njit, prange, int16, float64, int64, boolean
+from numba import njit, prange, int16, uint16, float64, int64, boolean
 import numpy as np
 from numpy.polynomial.polynomial import Polynomial
 
 from dirigo import units, io
 from dirigo.sw_interfaces.worker import Product, EndOfStream
-from dirigo.sw_interfaces.acquisition import Acquisition, AcquisitionProduct
 from dirigo.sw_interfaces.processor import Processor, ProcessorProduct
-from dirigo.plugins.processors import RasterFrameProcessor, resample_kernel
+from dirigo.plugins.processors import RasterFrameProcessor
 
 from dirigo_strip_acquisition.acquisitions import (
     RasterScanStitchedAcquisitionSpec, LineCameraStitchedAcquisitionSpec,
@@ -25,7 +23,8 @@ Expected limitations:
 
 sig = [
 #         strip         lines         positions     pixel_size  prev_row  flip_line
-    int64(int16[:,:,:], int16[:,:,:], float64[:,:], float64,    int64,    boolean)
+    int64(int16[:,:,:],  int16[:,:,:],  float64[:,:], float64,    int64,    boolean),
+    int64(uint16[:,:,:], uint16[:,:,:], float64[:,:], float64,    int64,    boolean)
 ]
 @njit(sig, parallel=True, fastmath=True, cache=True)
 def _line_placement_kernel(strip: np.ndarray,     # dim order (web, scan, chan)
@@ -63,6 +62,7 @@ def _line_placement_kernel(strip: np.ndarray,     # dim order (web, scan, chan)
             for j in range(n_width):
                 strip[(cur_row + prev_row)//2, j, :] = strip[cur_row, j, :]
 
+    # returns the last placed row
     return int(round(positions[lines.shape[0]-1, 0] / pixel_size))
 
 
@@ -81,12 +81,13 @@ class StripProcessor(Processor[RasterFrameProcessor]):
         prev_position = (self._positioner.web_min(0), self._positioner.scan_center(0))
         self._prev_position = np.array(prev_position, dtype=np.float64)
 
-        self._strip_shape = ( # strips are assembled in dim order: (web,scan,chan)
-            self._acq.final_shape[1],
+        self._strip_shape = ( # strips are assembled in dim order: (web, scan, chan)
+            self._acq.final_shape[1], # final_shape[1]: pixels in web dimension
             self._spec.pixels_per_line,
             self._acq.final_shape[2]
         )
-        self.init_product_pool(n=4, shape=self._strip_shape, dtype=np.int16)
+        dtype = self._acq.data_acquisition_device.data_range.recommended_dtype
+        self.init_product_pool(n=4, shape=self._strip_shape, dtype=dtype)
         
         self._strip_idx = 0
         self._prev_row = -1 # increments as _line_placement_kernel is called
@@ -101,46 +102,24 @@ class StripProcessor(Processor[RasterFrameProcessor]):
 
             while True:
                 with self._receive_product() as frame:
-
-                    p = np.array(frame.positions)
-                    # note: p is actually the 2nd position of the current frame
-                    # up to (and including) the first position of the NEXT frame
-                    # (a trick to allow interpolation of bidi reverse lines)
-
-                    # re-order positions (x,y) to dim order (web,scan)
-                    # exclude z axis positions, if present
-                    if self._system_config.fast_raster_scanner['axis'] == "x":
-                        p = p[:,1::-1] # switch
-                    elif self._system_config.fast_raster_scanner['axis'] == "y":
-                        p = p[:,:2] 
-
-                    if self._spec.bidirectional_scanning:           # TODO move this interpolation out to Acquisition class
-                        # interpolate (bidi-scanning expect 1:2 positions:lines)
-                        p1 = np.concatenate(
-                            (self._prev_position[np.newaxis,:], p[:-1,:]),
-                            axis=0
-                        )
-                        p2 = p[:,:]
-
-                        positions = np.zeros(
-                            shape=(frame.data.shape[0],2), 
-                            dtype=np.float64
-                        )
-                        positions[0::2,:] = p1
-                        positions[1::2,:] = (p1 + p2) / 2 # interpolated positions
-                    else:
-                        positions = np.concatenate(
-                            (self._prev_position[np.newaxis,:], p[:-1,:]),
-                            axis=0
-                        )
-                    self._prev_position = p[-1,:]
+                    positions = np.array(frame.positions)
 
                     strip_center_min = np.array([
-                        self._positioner.web_min(self._strip_idx),   
+                        self._positioner.web_min(self._strip_idx),        
                         self._positioner.scan_center(self._strip_idx)                        
                     ])
-                    strip_positions = positions - strip_center_min[np.newaxis,:]
-                    
+                    strip_positions = positions - strip_center_min[np.newaxis,:] # (web, scan)
+
+                    # Check whether this frame includes move to next strip
+                    translation = self._positioner.scan_center(self._strip_idx + 1) - self._positioner.scan_center(self._strip_idx)
+                    next_strip = round(strip_positions[-1, 1] / translation) > 0
+
+                    # blank out lines moving in opposite direction
+                    direction = 1 if (self._strip_idx % 2 == 0) else -1
+                    b = np.diff(strip_positions[:,0]) * direction < 0 # bool array of lines with opposite web velo sign
+                    b = np.insert(b, 0, False)
+                    strip_positions[b] = 0
+
                     self._prev_row = _line_placement_kernel( # add lines to strip
                         strip=strip.data, 
                         lines=frame.data,
@@ -150,13 +129,7 @@ class StripProcessor(Processor[RasterFrameProcessor]):
                         flip_line=False
                     )
 
-                    # Check whether this frame includes move to next strip
-                    width = self._spec.line_width * (1 - self._spec.strip_overlap)
-                    latest_strip_idx = round(
-                        (self._prev_position[1] - self._positioner.scan_center(0)) / width
-                    )
-
-                    if latest_strip_idx == self._strip_idx + 1:
+                    if next_strip:
                         # Moving to next strip, publish
                         print(f"Publishing strip {self._strip_idx} with size: {strip.data.shape}")
                         self._publish(strip)
@@ -181,8 +154,7 @@ class StripProcessor(Processor[RasterFrameProcessor]):
                             flip_line=False
                         )
                         
-
-        finally:
+        except EndOfStream:
             # publish final strip (completed or not)
             print(f"Publishing FINAL strip {self._strip_idx} with size: {strip.data.shape}")
             self._publish(strip)

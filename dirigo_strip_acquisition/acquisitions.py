@@ -1,10 +1,10 @@
-from typing import Optional
+from typing import Optional, Literal
 from abc import ABC, abstractmethod
 from functools import cached_property
 from pathlib import Path
-import math
-import time
+import math, time
 
+import numpy as np
 
 from dirigo import units, io
 from dirigo.sw_interfaces.acquisition import Acquisition, AcquisitionProduct, AcquisitionSpec
@@ -93,12 +93,24 @@ class RasterScanStripAcquisition(LineAcquisition):
 
     def read_positions(self):
         """Override provides sample positions from linear position encoders."""  # TODO: order dimensions scan, web?
-        if self._n_positions_read == 0:
-            # skip first position read
-            self.hw.encoders.read_positions(1)
+        if self.spec.bidirectional_scanning and self._n_positions_read == 0:
+            self._prev_pos = self.hw.encoders.read_positions(1)
             
         positions = self.hw.encoders.read_positions(self.spec.records_per_buffer) 
-        self._read_positions += self.spec.records_per_buffer
+        self._n_positions_read += self.spec.records_per_buffer
+
+        # Bidi scanning: 1 trigger/sample per 2 lines, interpolate missing line positions
+        if self.spec.bidirectional_scanning:
+            pos_0 = np.concatenate(
+                (self._prev_pos[np.newaxis,:], positions[:-1,:]),
+                axis=0
+            )
+            pos_1 = positions.copy()
+            self._prev_pos[:] = positions[-1,:]
+
+            # linear interpolation
+            positions = (pos_0 + pos_1) / 2
+
         return positions
 
 
@@ -121,15 +133,10 @@ class LineCameraStripAcquisition(LineCameraLineAcquisition):
 
         self._n_positions_read = 0
 
-        # get reference to the encoder channel perpendicular the camera axis
-        if self.hw.line_camera.axis == 'y':
-            if self.hw.encoders.x is None:
-                raise RuntimeError("Encoder not initialized")
-            self._web_encoder = self.hw.encoders.x
-        else:
-            if self.hw.encoders.y is None:
-                raise RuntimeError("Encoder not initialized")
-            self._web_encoder = self.hw.encoders.y
+        # TODO legitamize this hack
+        self.hw.encoders.x._sample_clock_channel = "/Dev1/PFI11"
+        self.hw.encoders.y._sample_clock_channel = "/Dev1/PFI11"
+        self.hw.encoders.x._timestamp_trigger_events = True
 
     # property: axis defined in super class
     # property: line_rate defined in super class
@@ -143,8 +150,7 @@ class LineCameraStripAcquisition(LineCameraLineAcquisition):
         - centers and parks the slow axis scanner (if present)
         """
         self.hw.illuminator.turn_on() 
-        self._web_encoder.start_triggering(self.spec.pixel_size)
-        self.hw.encoders.start_logging(self.hw)  # type: ignore
+        
 
         try:
             super().run()
@@ -152,14 +158,13 @@ class LineCameraStripAcquisition(LineCameraLineAcquisition):
         finally:
             self.hw.illuminator.turn_off() 
             self.hw.encoders.stop()
-            self._web_encoder.stop()
 
-    def read_positions(self, samples: Optional[int] = None):
+    def _read_positions(self):
         """Override provides sample positions from linear position encoders.""" 
-        n = samples or self.spec.lines_per_buffer 
-        positions = self.hw.encoders.read_positions(n)         
-        self._n_positions_read += n
+        positions = self.hw.encoders.read_positions(self.spec.lines_per_buffer)         
+        self._n_positions_read += self.spec.lines_per_buffer
         return positions
+
 
 
 # ---------- Stitched acquisition base class ----------
@@ -196,10 +201,10 @@ class StitchedAcquisition(Acquisition, ABC):
     machine vision 'web inspection')
 
     Concrete subclasses need to define required_resources, spec_location, 
-    Spec, and provide a method for setup_line_acquisition()
+    Spec, and provide a method for setup_strip_acquisition()
     """
     Spec = StitchedAcquisitionSpec
-    spec_location = io.config_path() / "acquisition/strip_acquisition"
+    spec_location = io.config_path() / "acquisition/stitched"
     
     def __init__(self, hw, system_config, spec):
         super().__init__(hw, system_config, spec)
@@ -213,15 +218,17 @@ class StitchedAcquisition(Acquisition, ABC):
         if self._strip_acquisition.axis == 'x':
             self._scan_axis_stage = self.hw.stages.x
             self._web_axis_stage = self.hw.stages.y # web axis = perpendicular to the fast raster scanner / line-scan camera axis
+            self._web_encoder = self.hw.encoders.y
             n_pixels_scan = round(self.spec.x_range.range / self._strip_acquisition.spec.pixel_size)
             n_pixels_web  = round(self.spec.y_range.range / self._strip_acquisition.spec.pixel_size)
         else:
             self._scan_axis_stage = self.hw.stages.y
             self._web_axis_stage = self.hw.stages.x
+            self._web_encoder = self.hw.encoders.x
             n_pixels_scan = round(self.spec.y_range.range / self._strip_acquisition.spec.pixel_size)
             n_pixels_web  = round(self.spec.x_range.range / self._strip_acquisition.spec.pixel_size)
 
-        if isinstance(self._strip_acquisition.data_acquisition_device, Digitizer):
+        if isinstance(self._strip_acquisition.data_acquisition_device, Digitizer):  # TODO make dynamic n_channels and axis error part of API
             n_channels = self._strip_acquisition.hw.digitizer.acquire.n_channels_enabled
             axis_error = self.hw.laser_scanning_optics.stage_scanner_angle
         else:
@@ -229,12 +236,12 @@ class StitchedAcquisition(Acquisition, ABC):
             axis_error = self.hw.camera_optics.stage_camera_angle
 
         self.positioner = RectangularFieldStagePositionHelper(
-            scan_axis=self.system_config.fast_raster_scanner['axis'],
+            scan_axis=self._strip_acquisition.axis,
             axis_error=axis_error,
-            line_width=self._strip_acquisition.spec.line_width,
+            line_width=self._strip_acquisition.spec.line_width, # TODO, remove line_width since it's already in spec
             spec=spec
         )
-        self._final_shape = (n_pixels_scan, n_pixels_web, n_channels)
+        self._final_shape = (n_pixels_scan, n_pixels_web, n_channels) 
 
     @property
     def final_shape(self) -> tuple[int,int,int]:
@@ -265,6 +272,7 @@ class StitchedAcquisition(Acquisition, ABC):
         # set strip velocity
         self._original_web_velocity = self._web_axis_stage.max_velocity
         self._web_axis_stage.max_velocity = self._web_velocity
+        _ = self._web_period # cache _web_period
 
         # start line acquisition & hold until it is 'active'
         self._strip_acquisition.start() 
@@ -273,6 +281,8 @@ class StitchedAcquisition(Acquisition, ABC):
 
         try:
             for strip_index in range(self.positioner.n_strips):
+                self.reset_encoders("forward" if (strip_index % 2) == 0 else "reverse")
+
                 if self._stop_event.is_set():
                     break # Terminate acquisitions
 
@@ -303,6 +313,10 @@ class StitchedAcquisition(Acquisition, ABC):
             # Revert the web axis velocity
             self._web_axis_stage.max_velocity = self._original_web_velocity
 
+    def reset_encoders(self, direction: Literal['forward', 'reverse']):
+        """Provide subclass implementation to start a camera trigger"""
+        pass
+
     @property
     def runtime_info(self):
         return self._strip_acquisition.runtime_info
@@ -317,7 +331,17 @@ class StitchedAcquisition(Acquisition, ABC):
     @cached_property
     def _web_period(self) -> units.Time:
         """The approximate period of time required to capture 1 strip."""
-        return self.positioner.web_limits.range / self._web_velocity
+        x = float(self.positioner.web_limits.range)
+        a = float(self._web_axis_stage.acceleration)
+        v_max = float(self._web_velocity)
+        x_crit = 2 * v_max**2 / a
+
+        if x <= x_crit:
+            return units.Time(2 * math.sqrt(x / a))
+        else:
+            return units.Time((2 * v_max/a) + (x - x_crit)/v_max)
+
+    
     
 
 
@@ -403,11 +427,30 @@ class LineCameraStitchedAcquisition(StitchedAcquisition):
         self._strip_acquisition: LineCameraStripAcquisition
         return self._strip_acquisition.camera_profile
     
+    def reset_encoders(self, direction):
+        self.hw.encoders.stop()
+
+        # Wait for stage to settle, so that initial positions remain correct
+        self.hw.stages.x.wait_until_move_finished()
+        self.hw.stages.y.wait_until_move_finished()
+        x_0 = self.hw.stages.x.position # TODO may be better to use positions from Positioner
+        y_0 = self.hw.stages.y.position
+
+        self._web_encoder.start_triggering(
+            distance_per_trigger    = self.spec.pixel_size, 
+            direction               = direction
+        )
+        self.hw.encoders.start_logging(
+            initial_position    = (x_0, y_0),    # type: ignore
+            line_rate           = 1 / self.spec.line_period,    # type: ignore
+        )  
+    
 
 
 # ---------- Helpers ----------
 class RectangularFieldStagePositionHelper:
     """Encapsulates stage runtime position calculations."""
+    EPS = 1e-9
     def __init__(self, 
                  scan_axis: str, 
                  axis_error: units.Angle, 
@@ -428,7 +471,7 @@ class RectangularFieldStagePositionHelper:
     def scan_center(self, strip_index: int) -> units.Position:
         """Return the center position (along scan dimension) for `strip_index`"""
         effective_line_width = self._line_width * (1 - self._spec.strip_overlap) # reduced by the overlap
-        relative_position = (strip_index + 0.5) * effective_line_width
+        relative_position = strip_index * effective_line_width + self._line_width / 2
 
         if self._scan_axis == "x":
             return units.Position(self._spec.x_range.min + relative_position)
@@ -458,6 +501,6 @@ class RectangularFieldStagePositionHelper:
             scan_axis_range = self._spec.x_range.range
         else:
             scan_axis_range = self._spec.y_range.range
-        N = (scan_axis_range - self._line_width) / effective_line_width + 1
+        N = (scan_axis_range - self._line_width - self.EPS) / effective_line_width + 1
         return max(math.ceil(N), 1)
     

@@ -23,3 +23,4 @@ tile_builder = "dirigo_strip_acquisition:TileBuilder"
 
 [project.entry-points."dirigo_loggers"]
 pyramid = "dirigo_strip_acquisition:PyramidLogger"
+strip_translation_calibration = "dirigo_strip_acquisition.calibrations:StripTranslationCalibrationLogger"
