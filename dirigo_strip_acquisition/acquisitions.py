@@ -151,7 +151,6 @@ class LineCameraStripAcquisition(LineCameraLineAcquisition):
         """
         self.hw.illuminator.turn_on() 
         
-
         try:
             super().run()
 
@@ -294,14 +293,16 @@ class StitchedAcquisition(Acquisition, ABC):
 
                 self._web_axis_stage.move_to(strip_end_position)
 
-                # wait until web axis decceleration
-                time.sleep(self._web_period + units.Time('10 ms')) # the last part is empirical
-
                 if strip_index < (self.positioner.n_strips - 1):
+                    # wait until web axis decceleration
+                    time.sleep(self._web_period + units.Time('10 ms')) # the last part is empirical
+
                     # begin lateral movement to the next strip
                     self._scan_axis_stage.move_to(
                         self.positioner.scan_center(strip_index=strip_index + 1)
                     )
+                else:
+                    time.sleep(units.Time('10 ms')) # Wait to be sure the stage is actually moving
 
                 # wait for web axis movement to come to complete stop
                 self._web_axis_stage.wait_until_move_finished()
@@ -450,7 +451,7 @@ class LineCameraStitchedAcquisition(StitchedAcquisition):
 # ---------- Helpers ----------
 class RectangularFieldStagePositionHelper:
     """Encapsulates stage runtime position calculations."""
-    EPS = 1e-9
+    EPS = units.Position(1e-9)
     def __init__(self, 
                  scan_axis: str, 
                  axis_error: units.Angle, 

@@ -16,7 +16,7 @@ from dirigo.plugins.loggers import TiffLogger
 from dirigo.plugins.processors import RasterFrameProcessor
 from dirigo.plugins.loaders import deserialize_float64_list
 from dirigo_strip_acquisition.acquisitions import (
-    StitchedStripAcquisitionSpec, RectangularFieldStagePositionHelper
+    StitchedAcquisitionSpec, RectangularFieldStagePositionHelper
 )
 from dirigo_strip_acquisition.processors import StripProcessor, StripStitcher, TileBuilder
 from dirigo_strip_acquisition.loggers import PyramidLogger
@@ -29,7 +29,7 @@ class StripAcquisitionLoader(Loader):
 
         with tifffile.TiffFile(self._file_path) as tif:   
 
-            self.init_product_pool(
+            self._init_product_pool(
                 n=4, 
                 shape=tif.pages[0].shape, 
                 dtype=tif.pages[0].dtype
@@ -93,20 +93,13 @@ class StripAcquisitionLoader(Loader):
                     frame.positions = self._positions[frames_read]
 
                     print(f"publishing frame {frames_read}")
-                    self.publish(frame)
+                    self._publish(frame)
 
                     frames_read += 1
         finally:
-            self.publish(None) # sentinel coding finished
+            self._publish(None) # sentinel coding finished
         
-    # TODO, check that these are not already implemented and we are (unnecessarily) shadowing them here
-    def init_product_pool(self, n, shape, dtype):
-        for _ in range(n):
-            aq_buf = AcquisitionProduct(
-                pool=self._product_pool,
-                data=np.empty(shape, dtype) # pre-allocates for large buffers
-            )
-            self._product_pool.put(aq_buf)
+
 
     def get_free_product(self) -> AcquisitionProduct:
         return self._product_pool.get()

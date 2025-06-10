@@ -87,7 +87,7 @@ class StripProcessor(Processor[RasterFrameProcessor]):
             self._acq.final_shape[2]
         )
         dtype = self._acq.data_acquisition_device.data_range.recommended_dtype
-        self.init_product_pool(n=4, shape=self._strip_shape, dtype=dtype)
+        self._init_product_pool(n=4, shape=self._strip_shape, dtype=dtype)
         
         self._strip_idx = 0
         self._prev_row = -1 # increments as _line_placement_kernel is called
@@ -282,6 +282,8 @@ class TileProduct(Product):
 
 class TileBuilder(Processor[StripStitcher]):
     """Parcels up tiles to send to file logger."""
+    Product = TileProduct
+
     def __init__(self, upstream: StripStitcher, tile_shape=(512,512)):
         super().__init__(upstream)
         self._acq: RasterScanStitchedAcquisition | LineCameraStitchedAcquisition
@@ -294,7 +296,7 @@ class TileBuilder(Processor[StripStitcher]):
         self._tile_shape = tile_shape
         self._n_channels = self._acq.final_shape[2]
 
-        self.init_product_pool(n=4, shape=(*self._tile_shape, self._n_channels), dtype=np.int16)
+        self._init_product_pool(n=4, shape=(*self._tile_shape, self._n_channels), dtype=np.int16)
 
         self._tiles_web  = math.ceil(self._acq.final_shape[1] / tile_shape[0]) # tiles along the web dimension (strip long axis)
         self._tiles_scan = math.ceil(self._acq.final_shape[0] / tile_shape[0]) # tiles along the scan dimension (strip short axis)
@@ -379,14 +381,6 @@ class TileBuilder(Processor[StripStitcher]):
 
         finally:
             self._publish(None)
-
-    def init_product_pool(self, n, shape, dtype):
-        for _ in range(n):
-            aq_buf = TileProduct(
-                pool=self._product_pool,
-                data=np.empty(shape, dtype) 
-            )
-            self._product_pool.put(aq_buf)
 
     def get_free_product(self, timeout: units.Time | None = None) -> TileProduct:
         return self._product_pool.get(timeout=timeout)
