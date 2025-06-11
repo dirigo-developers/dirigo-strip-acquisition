@@ -39,7 +39,7 @@ class PyramidLogger(Logger):
 
     def __init__(self, upstream: TileBuilder, levels: tuple = (1, 2, 8)):
         super().__init__(upstream)
-        self._acq: StitchedStripAcquisition
+        self._acq: StitchedAcquisition
         
         self._file       = self.save_path / f"{self.basename}.ome.tif"
         self._n_channels = upstream._n_channels
@@ -82,19 +82,29 @@ class PyramidLogger(Logger):
         try:
             while True:
                 with self._receive_product() as tile:
-                    # downsample & store into levels
                     if tile.coords is None:
                         raise RuntimeError("Tile coordinates not initialized")
-                    for level_idx, f in enumerate(self._levels[1:]):
+                    
+                    # While we have the native res tile, do downsampling
+                    prev_f = 1
+                    prev_data = tile.data
+                    for lvl_idx, f in enumerate(self._levels[1:]):
+                        # calculate tile index in downsampled image
                         di = tile.coords[0] // f
                         dj = tile.coords[1] // f
+
                         i0 = int( (tile.coords[0] / f - di) * self._tile_shape[0] )
                         j0 = int( (tile.coords[1] / f - dj) * self._tile_shape[1] )
                         i1 = i0 + self._tile_shape[0] // f
                         j1 = j0 + self._tile_shape[1] // f
-                        self._ds_tiles[level_idx][di, dj, i0:i1, j0:j1 , :] = \
-                            _downsample(tile.data, f) # TODO branch here to use prev downsampled data
 
+                        df = f // prev_f
+                        self._ds_tiles[lvl_idx][di, dj, i0:i1, j0:j1 , :] = \
+                            _downsample(prev_data, df) # TODO branch here to use prev downsampled data
+
+                        prev_f = f
+                        prev_data = self._ds_tiles[lvl_idx][di, dj, i0:i1, j0:j1 , :]
+                        
                     # yield full resolution data 
                     yield tile.data  
 
@@ -102,17 +112,17 @@ class PyramidLogger(Logger):
             self._publish(None)
 
     def _downsampled_tiles_gen(self, level_idx) -> Iterator[np.ndarray]:
-        ds_tiles: np.ndarray = self._ds_tiles[level_idx]
-        tile_idx = 0
+        # Get the tiles corresponding to a particular downsampled level
+        ds_tiles = self._ds_tiles[level_idx]
+        n_rows, n_cols = ds_tiles.shape[:2]
 
-        while True:
-            ti = tile_idx // ds_tiles.shape[1]
-            tj = tile_idx %  ds_tiles.shape[1]
-            if ti >= ds_tiles.shape[0]: 
-                break
-            yield ds_tiles[ti, tj, ...]
-            tile_idx += 1
-                               
+        try:
+            for ti in range(n_rows):
+                for tj in range(n_cols):
+                    yield ds_tiles[ti, tj, ...]
+        except GeneratorExit:
+            pass
+
     def run(self):
         try:
             self.save_data()

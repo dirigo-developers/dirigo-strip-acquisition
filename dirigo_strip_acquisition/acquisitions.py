@@ -55,6 +55,11 @@ class RasterScanStripAcquisition(LineAcquisition):
         super().__init__(hw, system_config, spec, thread_name)
         self.spec: RasterScanStripAcquisitionSpec
 
+        self.hw.encoders.x.sample_clock_channel \
+            = self.system_config.encoders['x_config']["sample_clock_channel"]
+        self.hw.encoders.y.sample_clock_channel \
+            = self.system_config.encoders['y_config']["sample_clock_channel"]
+
         self._n_positions_read = 0
 
     @property
@@ -134,9 +139,14 @@ class LineCameraStripAcquisition(LineCameraLineAcquisition):
         self._n_positions_read = 0
 
         # TODO legitamize this hack
-        self.hw.encoders.x._sample_clock_channel = self.hw.encoders.x._trigger_channel
-        self.hw.encoders.y._sample_clock_channel = self.hw.encoders.x._trigger_channel
-        self.hw.encoders.x._timestamp_trigger_events = True
+        # self.hw.encoders.x._sample_clock_channel = self.hw.encoders.x._trigger_channel
+        # self.hw.encoders.y._sample_clock_channel = self.hw.encoders.x._trigger_channel
+        #self.hw.encoders.x._timestamp_trigger_events = True
+
+        w = ("x" if self.hw.line_camera.axis == "y" else "y") +  "_config"
+        sample_clock_channel = self.system_config.encoders[w]["trigger_channel"]
+        self.hw.encoders.x.sample_clock_channel = sample_clock_channel
+        self.hw.encoders.y.sample_clock_channel = sample_clock_channel
 
     # property: axis defined in super class
     # property: line_rate defined in super class
