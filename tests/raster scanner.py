@@ -15,6 +15,7 @@ pyramid_logger  = diri.make_logger("pyramid",
                                    upstream=tile_builder,
                                    levels=(1,2,4,8,16,32))
 
+display         = diri.make_display_processor("stitched_preview", upstream=tile_builder)
 
 acquisition.start()
 pyramid_logger.join()

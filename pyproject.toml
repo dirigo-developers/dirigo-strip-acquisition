@@ -24,3 +24,6 @@ tile_builder = "dirigo_strip_acquisition:TileBuilder"
 [project.entry-points."dirigo_loggers"]
 pyramid = "dirigo_strip_acquisition:PyramidLogger"
 strip_translation_calibration = "dirigo_strip_acquisition.calibrations:StripTranslationCalibrationLogger"
+
+[project.entry-points."dirigo_displays"]
+stitched_preview = "dirigo_strip_acquisition.displays:StitchedPreviewDisplay"

@@ -13,7 +13,7 @@ from dirigo_strip_acquisition.acquisitions import StitchedAcquisition
 
 sig = [types.int16[:,:,:](types.int16[:,:,:], types.int64)]
 @njit(sig, parallel=True, fastmath=True, cache=True)
-def _downsample(tile: np.ndarray, f: int) -> np.ndarray:
+def downsample_kernel(tile: np.ndarray, f: int) -> np.ndarray:
     h, w, n_channels = tile.shape
     ds_h, ds_w = h//f, w//f
     area = f * f
@@ -100,7 +100,7 @@ class PyramidLogger(Logger):
 
                         df = f // prev_f
                         self._ds_tiles[lvl_idx][di, dj, i0:i1, j0:j1 , :] = \
-                            _downsample(prev_data, df) # TODO branch here to use prev downsampled data
+                            downsample_kernel(prev_data, df) # TODO branch here to use prev downsampled data
 
                         prev_f = f
                         prev_data = self._ds_tiles[lvl_idx][di, dj, i0:i1, j0:j1 , :]
