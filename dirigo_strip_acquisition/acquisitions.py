@@ -110,7 +110,7 @@ class RasterScanStripAcquisition(LineAcquisition):
         # Bidi scanning: 1 trigger/sample per 2 lines, interpolate missing line positions
         if self.spec.bidirectional_scanning:
             pos_0 = np.concatenate(
-                (self._prev_pos[np.newaxis,:], positions[:-1,:]),
+                (self._prev_pos, positions[:-1,:]),
                 axis=0
             )
             pos_1 = positions.copy()
@@ -319,7 +319,6 @@ class StitchedAcquisition(Acquisition, ABC):
 
                 # wait for web axis movement to come to complete stop
                 self._web_axis_stage.wait_until_move_finished()
-                print("finished")
 
         finally:
             # Stop the line acquisition Worker
