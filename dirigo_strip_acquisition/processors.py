@@ -73,9 +73,10 @@ class StripProcessor(Processor[RasterFrameProcessor]):
 
         self._spec: RasterScanStitchedAcquisitionSpec | LineCameraStitchedAcquisitionSpec
         self._acq: RasterScanStitchedAcquisition | LineCameraStitchedAcquisition
+        self._web_axis = self._acq._web_axis_stage.axis # TODO should be accessed via runtime
         self._system_config = self._acq.system_config
         self._data_range = upstream.data_range
-        self._positioner = self._acq.positioner 
+        self._positioner = self._acq.positioner
 
         # positions are stored in order (web, scan)
         prev_position = (self._positioner.web_min(0), self._positioner.scan_center(0))
@@ -105,7 +106,12 @@ class StripProcessor(Processor[RasterFrameProcessor]):
 
             while True:
                 with self._receive_product() as frame:
-                    positions = np.array(frame.positions)
+                    if frame.positions is None:
+                        raise RuntimeError("Incoming frame missing encoder positions")
+                    if self._web_axis == "y":
+                        positions = np.array(frame.positions[:,::-1]) # flip so order is (web, scan)
+                    else:
+                        positions = np.array(frame.positions)
 
                     strip_center_min = np.array([
                         self._positioner.web_min(self._strip_idx),        
