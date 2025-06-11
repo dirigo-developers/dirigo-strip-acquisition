@@ -79,8 +79,11 @@ class RasterScanStripAcquisition(LineAcquisition):
         - starts and stops the position encoders
         - centers and parks the slow axis scanner (if present)
         """
-        # pass hw reference to allow the method to get initial positions, scanner frequency
-        self.hw.encoders.start_logging(self.hw)  # type: ignore
+        init_pos = (self.hw.stages.x.position, self.hw.stages.y.position)
+        self.hw.encoders.start_logging(
+            initial_position=init_pos,
+            line_rate=self.hw.fast_raster_scanner.frequency
+        )  # type: ignore
 
         try:
             # If slow raster scanner present, center 
