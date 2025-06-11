@@ -278,7 +278,7 @@ class TileProduct(Product):
                  pool, 
                  data: np.ndarray,
                  tile_coords: Optional[tuple] = None):
-        super().__init__(pool)
+        super().__init__(pool, data)
         self.data = data
         self.coords = tile_coords
 
