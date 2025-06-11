@@ -162,7 +162,8 @@ class StripProcessor(Processor[RasterFrameProcessor]):
                             prev_row=self._prev_row,
                             flip_line=False
                         )
-                        
+
+        # The only way out of above while loop is to encounter EndOfStream in _receive_product()                
         except EndOfStream:
             # publish final strip (completed or not)
             print(f"Publishing FINAL strip {self._strip_idx} with size: {strip.data.shape}")
@@ -208,6 +209,7 @@ class StripStitcher(Processor[StripProcessor]):
         try:
             while True:
                 with self._receive_product() as strip_product:
+                    strip_product.hold_once() # product won't be released until it is opened again
 
                     if self._prev_strip is None:
                         # we need one more strip to start blending
@@ -218,7 +220,7 @@ class StripStitcher(Processor[StripProcessor]):
                                 strip_product.data,
                                 self._overlap_pixels)
                     
-                    with self._prev_strip:
+                    with self._prev_strip: # this is the 2nd time this Product is entered, so it will release after this
                         self._publish(self._prev_strip)
                         # publish increments product._remaining
                         # exiting context manager decrements product._remaining
@@ -226,9 +228,10 @@ class StripStitcher(Processor[StripProcessor]):
 
                     self._prev_strip = strip_product
 
-        finally:
+        except EndOfStream:
             if self._prev_strip is not None:
-                self._publish(self._prev_strip)
+                with self._prev_strip:
+                    self._publish(self._prev_strip)
             self._publish(None)
 
     @property
@@ -385,11 +388,12 @@ class TileBuilder(Processor[StripStitcher]):
                         #print(f"Publishing tile {tile_idx}: ({t_s},{t_w}), shape: {tile.data.shape}, dtype: {tile.data.dtype}")
                         self._publish(tile)
                         tile_idx += 1
+
         except EndOfStream:
             self._publish(None)
 
-        finally:
-            self._publish(None)
+        # finally:
+        #     self._publish(None)
 
     def get_free_product(self, timeout: units.Time | None = None) -> TileProduct:
         return self._product_pool.get(timeout=timeout)
