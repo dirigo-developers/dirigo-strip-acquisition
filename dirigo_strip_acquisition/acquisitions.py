@@ -308,7 +308,7 @@ class StitchedAcquisition(Acquisition, ABC):
 
                 if strip_index < (self.positioner.n_strips - 1):
                     # wait until web axis decceleration
-                    time.sleep(self._web_period + units.Time('10 ms')) # the last part is empirical
+                    time.sleep(self._web_period + units.Time('0 ms')) # the last part is empirical
 
                     # begin lateral movement to the next strip
                     self._scan_axis_stage.move_to(

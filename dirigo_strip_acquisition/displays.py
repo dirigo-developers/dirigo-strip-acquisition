@@ -1,4 +1,4 @@
-
+import time
 import numpy as np
 
 from dirigo.sw_interfaces.worker import Product, EndOfStream
@@ -52,11 +52,16 @@ class StitchedPreviewDisplay(Display):
                          self._tiles_web  * self._tile_length)     # (scan, web)
         self._init_product_pool(n=1, shape=(*preview_shape, bpp), dtype=np.uint8)
 
+        
+
     def _receive_product(self) -> TileProduct:
         return super()._receive_product() # type: ignore
     
     def run(self):
         try:
+            # publish a blank image to initialize frame
+            self._publish(self._get_free_product())
+
             for ts in range(self._tiles_scan):
                 # Get the preview product from the pool
                 preview = self._get_free_product()
@@ -82,6 +87,8 @@ class StitchedPreviewDisplay(Display):
 
                 self._publish(preview)
                 print("Published preview on scan row", ts)
+
+            self._publish(None) # forward sentinel None
 
         except EndOfStream:
             self._publish(None) # forward sentinel None
