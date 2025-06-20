@@ -246,7 +246,7 @@ class StitchedAcquisition(Acquisition, ABC):
             n_channels = self._strip_acquisition.hw.digitizer.acquire.n_channels_enabled
             axis_error = self.hw.laser_scanning_optics.stage_scanner_angle
         else:
-            n_channels = 1
+            n_channels = 3 if self.runtime_info.camera_bit_depth == 24 else 3
             axis_error = self.hw.camera_optics.stage_camera_angle
 
         self.positioner = RectangularFieldStagePositionHelper(
