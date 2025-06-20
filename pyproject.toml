@@ -20,10 +20,8 @@ line_camera_stitched = "dirigo_strip_acquisition:LineCameraStitchedAcquisition"
 strip = "dirigo_strip_acquisition:StripProcessor"
 strip_stitcher = "dirigo_strip_acquisition:StripStitcher"
 tile_builder = "dirigo_strip_acquisition:TileBuilder"
+stitch_preview = "dirigo_strip_acquisition:StitchedPreview"
 
 [project.entry-points."dirigo_loggers"]
 pyramid = "dirigo_strip_acquisition:PyramidLogger"
 strip_translation_calibration = "dirigo_strip_acquisition.calibrations:StripTranslationCalibrationLogger"
-
-[project.entry-points."dirigo_displays"]
-stitched_preview = "dirigo_strip_acquisition.displays:StitchedPreviewDisplay"

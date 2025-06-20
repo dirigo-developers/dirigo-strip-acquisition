@@ -1,20 +1,21 @@
-import math
+import math, time
 from typing import Optional
 
-from numba import njit, prange, int16, uint16, float64, int64, boolean
+from numba import njit, prange, int16, uint8, uint16, float64, int64, boolean
 import numpy as np
 from numpy.polynomial.polynomial import Polynomial
 
 from dirigo import units, io
-from dirigo.sw_interfaces.worker import Product, EndOfStream
+from dirigo.sw_interfaces.worker import Product, EndOfStream, Worker
 from dirigo.sw_interfaces.processor import Processor, ProcessorProduct
 from dirigo.plugins.processors import RasterFrameProcessor
 
 from dirigo_strip_acquisition.acquisitions import (
     RasterScanStitchedAcquisitionSpec, LineCameraStitchedAcquisitionSpec,
     RasterScanStitchedAcquisition, LineCameraStitchedAcquisition
-
 )
+
+
 
 """
 Expected limitations:
@@ -72,22 +73,22 @@ class StripProcessor(Processor[RasterFrameProcessor]):
         super().__init__(upstream)
 
         self._spec: RasterScanStitchedAcquisitionSpec | LineCameraStitchedAcquisitionSpec
-        self._acq: RasterScanStitchedAcquisition | LineCameraStitchedAcquisition
-        self._web_axis = self._acq._web_axis_stage.axis # TODO should be accessed via runtime
-        self._system_config = self._acq.system_config
+        self._acquisition: RasterScanStitchedAcquisition | LineCameraStitchedAcquisition
+        self._web_axis = self._acquisition._web_axis_stage.axis # TODO should be accessed via runtime
+        self._system_config = self._acquisition.system_config
         self._data_range = upstream.data_range
-        self._positioner = self._acq.positioner
+        self._positioner = self._acquisition.positioner
 
         # positions are stored in order (web, scan)
         prev_position = (self._positioner.web_min(0), self._positioner.scan_center(0))
         self._prev_position = np.array(prev_position, dtype=np.float64)
 
         self._strip_shape = ( # strips are assembled in dim order: (web, scan, chan)
-            self._acq.final_shape[1], # final_shape[1]: pixels in web dimension
+            self._acquisition.final_shape[1], # final_shape[1]: pixels in web dimension
             self._spec.pixels_per_line,
-            self._acq.final_shape[2]
+            self._acquisition.final_shape[2]
         )
-        if self._acq.data_acquisition_device.data_range.recommended_dtype in {np.uint8, np.uint16}:
+        if self._acquisition.data_acquisition_device.data_range.recommended_dtype in {np.uint8, np.uint16}:
             dt = np.uint16
         else:
             dt = np.int16
@@ -109,25 +110,27 @@ class StripProcessor(Processor[RasterFrameProcessor]):
                     if frame.positions is None:
                         raise RuntimeError("Incoming frame missing encoder positions")
                     if self._web_axis == "y":
-                        positions = np.array(frame.positions[:,::-1]) # flip so order is (web, scan)
+                        positions = np.array(frame.positions[:,::-1]) # flip so order is (web[y], scan[x])
                     else:
                         positions = np.array(frame.positions)
 
-                    strip_center_min = np.array([
+                    strip_center_min = np.array([[
                         self._positioner.web_min(self._strip_idx),        
                         self._positioner.scan_center(self._strip_idx)                        
-                    ])
-                    strip_positions = positions - strip_center_min[np.newaxis,:] # (web, scan)
+                    ]])
+                    strip_positions = positions - strip_center_min # (web, scan)
 
                     # Check whether this frame includes move to next strip
                     translation = self._positioner.scan_center(self._strip_idx + 1) - self._positioner.scan_center(self._strip_idx)
                     next_strip = round(strip_positions[-1, 1] / translation) > 0
 
-                    # blank out lines moving in opposite direction
-                    direction = 1 if (self._strip_idx % 2 == 0) else -1
-                    b = np.diff(strip_positions[:,0]) * direction < 0 # bool array of lines with opposite web velo sign
-                    b = np.insert(b, 0, False)
-                    strip_positions[b] = 0
+                    if next_strip:
+                        # if we know there is next strip data in this product,
+                        # blank out lines moving in opposite direction
+                        direction = 1 if (self._strip_idx % 2 == 0) else -1
+                        b = np.diff(strip_positions[:,0]) * direction < 0 # bool array of lines with opposite web velo sign
+                        b = np.insert(b, 0, False)
+                        strip_positions[b] = 0
 
                     self._prev_row = _line_placement_kernel( # add lines to strip
                         strip=strip.data, 
@@ -298,7 +301,7 @@ class TileBuilder(Processor[StripStitcher]):
 
     def __init__(self, upstream: StripStitcher, tile_shape=(512,512)):
         super().__init__(upstream)
-        self._acq: RasterScanStitchedAcquisition | LineCameraStitchedAcquisition
+        self._acquisition: RasterScanStitchedAcquisition | LineCameraStitchedAcquisition
         self._spec: RasterScanStitchedAcquisitionSpec | LineCameraStitchedAcquisitionSpec
 
         if tile_shape[0] != tile_shape[1]:
@@ -306,12 +309,12 @@ class TileBuilder(Processor[StripStitcher]):
 
         self._data_range = upstream.data_range
         self._tile_shape = tile_shape
-        self._n_channels = self._acq.final_shape[2]
+        self._n_channels = self._acquisition.final_shape[2]
 
         self._init_product_pool(n=4, shape=(*self._tile_shape, self._n_channels), dtype=np.int16)
 
-        self._tiles_web  = math.ceil(self._acq.final_shape[1] / tile_shape[0]) # tiles along the web dimension (strip long axis)
-        self._tiles_scan = math.ceil(self._acq.final_shape[0] / tile_shape[0]) # tiles along the scan dimension (strip short axis)
+        self._tiles_web  = math.ceil(self._acquisition.final_shape[1] / tile_shape[0]) # tiles along the web dimension (strip long axis)
+        self._tiles_scan = math.ceil(self._acquisition.final_shape[0] / tile_shape[0]) # tiles along the scan dimension (strip short axis)
         
         self._leftovers: Optional[np.ndarray] = None
 
@@ -381,7 +384,7 @@ class TileBuilder(Processor[StripStitcher]):
                             ]
                             tile.data[:data2.shape[0], -data2.shape[1]:, :] = data2
                         
-                        if self._acq.system_config.fast_raster_scanner['axis'] == "x":
+                        if self._acquisition.system_config.fast_raster_scanner['axis'] == "x":
                             _transpose_inplace(tile.data)
                             #_rotate90_inplace(tile.data, False)
 
@@ -397,6 +400,120 @@ class TileBuilder(Processor[StripStitcher]):
 
     def get_free_product(self, timeout: units.Time | None = None) -> TileProduct:
         return self._product_pool.get(timeout=timeout)
+
+    @property
+    def data_range(self) -> units.IntRange:
+        return self._data_range
+
+
+
+sigs = [
+     uint8[:,:,:]( uint8[:,:,:], int64),
+    uint16[:,:,:](uint16[:,:,:], int64),
+     int16[:,:,:]( int16[:,:,:], int64)
+]
+@njit(sigs, parallel=True, fastmath=True, cache=True)
+def downsample_kernel(tile: np.ndarray, f: int) -> np.ndarray:
+    h, w, n_channels = tile.shape
+    ds_h, ds_w = h//f, w//f
+    area = f * f
+
+    downsampled_tile = np.empty((ds_h, ds_w, n_channels), tile.dtype)
+
+    for i in prange(ds_h):
+        for j in range(ds_w):
+            for k in range(n_channels):
+
+                tmp = np.int32(0)
+                for di in range(f):
+                    for dj in range(f):
+
+                        tmp += tile[i*f + di, j*f + dj, k]
+
+                downsampled_tile[i, j, k] = tmp // area
+    
+    return downsampled_tile
+
+
+
+class StitchedPreview(Processor):
+    """
+    Creates a downsampled preview of stitched image from tiles.
+    """
+    def __init__(self, 
+                 upstream: TileBuilder, 
+                 downsample: int = 16,
+                 **kwargs):
+        super().__init__(upstream, **kwargs)
+        self._hold = True # effectively holds off starting run loop
+        self._acquisition: RasterScanStitchedAcquisition
+        self._data_range = upstream.data_range
+        self._downsample = downsample
+
+        # Product is a downsampled version of the full stitched image       
+        self._downsampled_tile_length = upstream.product_shape[0] // downsample
+        self._tiles_scan = math.ceil(
+            self._acquisition.final_shape[0] / upstream.product_shape[0]
+        )
+        self._tiles_web  = math.ceil(
+            self._acquisition.final_shape[1] / upstream.product_shape[0]
+        )
+        preview_shape = (self._tiles_scan * self._downsampled_tile_length, 
+                         self._tiles_web  * self._downsampled_tile_length,
+                         self._acquisition.final_shape[2])     # (scan, web)
+
+        self._init_product_pool(
+            n       = 1, 
+            shape   = preview_shape, 
+            dtype   = self.data_range.recommended_dtype,
+        )
+
+    def _receive_product(self) -> ProcessorProduct:
+        return super()._receive_product() # type: ignore
+    
+    def run(self):
+        while self._hold:
+            # trick to avoid deadlock: getting stuck at _receive_product()
+            time.sleep(0.05)
+        try:
+            for ts in range(self._tiles_scan):
+                # Get the preview product from the pool
+                preview = self._get_free_product()
+
+                # work through all the tiles along the web direction, then publish
+                for tw in range(self._tiles_web):
+
+                    with self._receive_product() as tile:
+                        i0 = ts * self._downsampled_tile_length
+                        j0 = tw * self._downsampled_tile_length
+                        i1 = i0 + self._downsampled_tile_length
+                        j1 = j0 + self._downsampled_tile_length
+                        # downsample and place in array
+                        preview.data[i0:i1, j0:j1, :] = \
+                            downsample_kernel(tile.data, self._downsample)
+
+                self._publish(preview)
+                print("Published preview(s) on scan row", ts)
+
+            self._publish(None) # forward sentinel None
+
+        except EndOfStream:
+            self._publish(None) # forward sentinel None
+
+    def add_subscriber(self, subscriber: Worker):
+        """Adds the subscriber and publishes a blank product."""
+        super().add_subscriber(subscriber)
+        self._publish(self._get_free_product())
+        self._hold = False
+
+    def update_display(self, skip_when_acquisition_in_progress: bool = True):
+        """
+        On demand reprocessing of the last acquired frame for display.
+        
+        Used when the acquisition is stopped and need to update the appearance  
+        of the last acquired frame.
+        """
+        pass
 
     @property
     def data_range(self) -> units.IntRange:

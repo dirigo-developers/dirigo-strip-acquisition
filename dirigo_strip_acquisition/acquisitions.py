@@ -116,8 +116,10 @@ class RasterScanStripAcquisition(LineAcquisition):
             pos_1 = positions.copy()
             self._prev_pos[:] = positions[-1,:]
 
-            # linear interpolation
-            positions = (pos_0 + pos_1) / 2
+            # interlace the interpolated positions
+            positions = np.empty(shape=(2*self.spec.records_per_buffer, 2))
+            positions[0::2,:] = pos_0
+            positions[1::2,:] = (pos_0 + pos_1) / 2
 
         return positions
 
@@ -356,8 +358,6 @@ class StitchedAcquisition(Acquisition, ABC):
             return units.Time((2 * v_max/a) + (x - x_crit)/v_max)
 
     
-    
-
 
 # ---------- Stitched acquisitions concrete classes ----------
 class RasterScanStitchedAcquisitionSpec(StitchedAcquisitionSpec, RasterScanStripAcquisitionSpec):
