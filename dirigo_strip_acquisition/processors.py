@@ -67,7 +67,7 @@ def _line_placement_kernel(strip: np.ndarray,     # dim order (web, scan, chan)
     return int(round(positions[lines.shape[0]-1, 0] / pixel_size))
 
 
-class StripProcessor(Processor[RasterFrameProcessor]):
+class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be used with a LineCamera Processor (not limited to raster)
     """  """
     def __init__(self, upstream: RasterFrameProcessor):
         super().__init__(upstream)
