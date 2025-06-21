@@ -25,7 +25,7 @@ Expected limitations:
 sig = [
 #         strip         lines         positions     pixel_size  prev_row  flip_line
     int64(int16[:,:,:],  int16[:,:,:],  float64[:,:], float64,    int64,    boolean),
-    int64(uint16[:,:,:], uint16[:,:,:], float64[:,:], float64,    int64,    boolean)
+    #int64(uint16[:,:,:], uint16[:,:,:], float64[:,:], float64,    int64,    boolean)
 ]
 @njit(sig, parallel=True, fastmath=True, cache=True)
 def _line_placement_kernel(strip: np.ndarray,     # dim order (web, scan, chan)
@@ -88,11 +88,8 @@ class StripProcessor(Processor[RasterFrameProcessor]):
             self._spec.pixels_per_line,
             self._acquisition.final_shape[2]
         )
-        if self._acquisition.data_acquisition_device.data_range.recommended_dtype in {np.uint8, np.uint16}:
-            dt = np.uint16
-        else:
-            dt = np.int16
-        self._init_product_pool(n=4, shape=self._strip_shape, dtype=dt)
+
+        self._init_product_pool(n=4, shape=self._strip_shape, dtype=np.int16)
         
         self._strip_idx = 0
         self._prev_row = -1 # increments as _line_placement_kernel is called
