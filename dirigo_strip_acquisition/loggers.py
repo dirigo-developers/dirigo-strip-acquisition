@@ -1,5 +1,5 @@
 from typing import Iterator, Optional
-import math
+import math, time
 
 import tifffile
 import numpy as np
@@ -22,7 +22,6 @@ class PyramidLogger(Logger):
         super().__init__(upstream)
         self._acquisition: StitchedAcquisition
         
-        self.file_path   = self.save_path / f"{self.basename}.ome.tif"
         self._n_channels = upstream.product_shape[2]
         self._shape      = (*self._acquisition.final_shape[:2], self._n_channels)
         self._dtype      = upstream.product_dtype
@@ -118,8 +117,12 @@ class PyramidLogger(Logger):
             print("Image write complete")
 
     def save_data(self):
+        while not self._acquisition.is_alive() or self._stop_event.is_set():
+            # Spin while waiting for acquisition
+            time.sleep(0.01)
 
-        with tifffile.TiffWriter(self.file_path, bigtiff=True) as tif:
+        fp = self.save_path / f"{self.basename}.ome.tif"
+        with tifffile.TiffWriter(fp, bigtiff=True) as tif:
             tif.write(
                 self._tiles_gen(),
                 shape=self._shape,
@@ -137,3 +140,5 @@ class PyramidLogger(Logger):
                     subfiletype=1,
                     **self._options # type: ignore
                 )
+        
+        self.last_saved_file_path = fp
