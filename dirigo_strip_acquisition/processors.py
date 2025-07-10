@@ -503,15 +503,6 @@ class StitchedPreview(Processor):
         self._publish(self._get_free_product())
         self._hold = False
 
-    def update_display(self, skip_when_acquisition_in_progress: bool = True):
-        """
-        On demand reprocessing of the last acquired frame for display.
-        
-        Used when the acquisition is stopped and need to update the appearance  
-        of the last acquired frame.
-        """
-        pass
-
     @property
     def data_range(self) -> units.IntRange:
         return self._data_range
