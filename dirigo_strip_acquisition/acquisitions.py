@@ -279,7 +279,9 @@ class StitchedAcquisition(Acquisition, ABC):
     def run(self):
         # move to start (2 axes)
         self._scan_axis_stage.move_to(self.positioner.scan_center(strip_index=0))
-        self._web_axis_stage.move_to(self.positioner.web_limits.min)
+        self._web_axis_stage.move_to(
+            self.positioner.web_limits.min - self.spec.pixel_size # a bit extra movement to be sure we trigger enough samples
+        )
         self._scan_axis_stage.wait_until_move_finished()
         self._web_axis_stage.wait_until_move_finished()
 
@@ -302,10 +304,9 @@ class StitchedAcquisition(Acquisition, ABC):
 
                 # start web axis movement
                 if strip_index % 2:
-                    strip_end_position = self.positioner.web_limits.min
+                    strip_end_position = self.positioner.web_limits.min - self.spec.pixel_size
                 else:
-                    # add a little bit extra (pixel size) to make sure travel enough
-                    strip_end_position = self.positioner.web_limits.max + self.spec.pixel_size
+                    strip_end_position = self.positioner.web_limits.max
 
                 self._web_axis_stage.move_to(strip_end_position)
 
