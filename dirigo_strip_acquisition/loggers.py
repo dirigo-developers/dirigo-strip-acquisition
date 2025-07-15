@@ -118,7 +118,7 @@ class PyramidLogger(Logger):
 
     def save_data(self):
         while not self._acquisition.is_alive() or self._stop_event.is_set():
-            # Spin while waiting for acquisition
+            # Spin while waiting for acquisition to start
             time.sleep(0.01)
 
         fp = self.save_path / f"{self.basename}.ome.tif"

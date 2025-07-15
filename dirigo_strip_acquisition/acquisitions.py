@@ -288,7 +288,7 @@ class StitchedAcquisition(Acquisition, ABC):
         self._web_axis_stage.max_velocity = self._web_velocity
         _ = self._web_period # cache _web_period
 
-        # start line acquisition & hold until it is 'active'
+        # start line acquisition & hold until it is 'active' (prevents premature movements)
         self._strip_acquisition.start() 
         while not self._strip_acquisition.active.is_set():
             time.sleep(0.001) # wait (active event indicates data is acquiring)
@@ -304,7 +304,8 @@ class StitchedAcquisition(Acquisition, ABC):
                 if strip_index % 2:
                     strip_end_position = self.positioner.web_limits.min
                 else:
-                    strip_end_position = self.positioner.web_limits.max
+                    # add a little bit extra (pixel size) to make sure travel enough
+                    strip_end_position = self.positioner.web_limits.max + self.spec.pixel_size
 
                 self._web_axis_stage.move_to(strip_end_position)
 
