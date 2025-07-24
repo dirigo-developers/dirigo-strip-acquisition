@@ -5,8 +5,11 @@ import numpy as np
 from numpy.polynomial.polynomial import Polynomial
 from platformdirs import user_config_path
 import tifffile
+import matplotlib.pyplot as plt
+from scipy.ndimage import uniform_filter1d
 
 from dirigo.components.io import SystemConfig
+from dirigo.sw_interfaces.worker import EndOfStream
 from dirigo.sw_interfaces.logger import Logger
 from dirigo.sw_interfaces.acquisition import AcquisitionProduct, Loader
 from dirigo.sw_interfaces.processor import ProcessorProduct
@@ -16,10 +19,11 @@ from dirigo.plugins.loggers import TiffLogger
 from dirigo.plugins.processors import RasterFrameProcessor
 from dirigo.plugins.loaders import deserialize_float64_list
 from dirigo_strip_acquisition.acquisitions import (
-    StitchedAcquisitionSpec, RectangularFieldStagePositionHelper
+    RectangularFieldStagePositionHelper, RasterScanStitchedAcquisitionSpec
 )
 from dirigo_strip_acquisition.processors import StripProcessor, StripStitcher, TileBuilder
 from dirigo_strip_acquisition.loggers import PyramidLogger
+
 
 
 
@@ -38,21 +42,22 @@ class StripAcquisitionLoader(Loader):
             tags = tif.pages[0].tags
 
             cfg_dict = json.loads(tags[TiffLogger.SYSTEM_CONFIG_TAG].value)
-            self.system_config = SystemConfig(**cfg_dict)
+            self.system_config = SystemConfig(cfg_dict)
 
             runtime_dict = json.loads(tags[TiffLogger.RUNTIME_INFO_TAG].value)
             self.runtime_info = LineAcquisitionRuntimeInfo.from_dict(runtime_dict)
 
             spec_dict = json.loads(tags[TiffLogger.ACQUISITION_SPEC_TAG].value)
-            self.spec = StitchedStripAcquisitionSpec(**spec_dict)
+            self.spec = RasterScanStitchedAcquisitionSpec(**spec_dict)
 
             digi_dict = json.loads(tags[TiffLogger.DIGITIZER_PROFILE_TAG].value)
             self.digitizer_profile = DigitizerProfile.from_dict(digi_dict)
 
         self.positioner = RectangularFieldStagePositionHelper(
-            scan_axis=self.system_config.fast_raster_scanner['axis'],
-            axis_error=self.system_config.fast_raster_scanner['axis_error'],
-            spec=self.spec
+            scan_axis   = self.system_config.fast_raster_scanner['axis'],
+            axis_error  = self.runtime_info.stage_scanner_angle, # type: ignore
+            line_width  = self.spec.line_width,
+            spec        = self.spec
         )
         
         if self.system_config.fast_raster_scanner['axis'] == 'x':
@@ -125,7 +130,7 @@ class SignalGradientLogger(Logger):
 
         finally:
             self.save_data(self._strip_sum)
-            self.publish(None)
+            self._publish(None)
 
     def save_data(self, strip_sum: np.ndarray):
         # Fit data to polynomial
@@ -143,32 +148,95 @@ class SignalGradientLogger(Logger):
         with tifffile.TiffWriter(fn) as tif:
             tif.write(gradient.astype(np.float32))
 
+
+class LineTimestampLogger(Logger):
+    """Log all the line timestamps"""
+    def __init__(self, upstream):
+        super().__init__(upstream)
+        self._timestamps = []
+
+    def _receive_product(self) -> AcquisitionProduct:
+        return super()._receive_product() # type: ignore
+
+    def run(self):
+        try:
+            while True:
+                with self._receive_product() as frame:
+                    self._timestamps.append(frame.timestamps)
+        except EndOfStream:
+            self._publish(None)
+
+    def save_data(self):
+        timestamps = np.array(self._timestamps).ravel()
+        dt = np.diff(timestamps)
+        dt_filtered = uniform_filter1d(dt, size=256)
+        plt.plot(1/dt_filtered)
+        plt.xlabel("Trigger number")
+        plt.ylabel("Frequency (Hz)")
+        plt.show()
+
+
+class PhaseLogger(Logger):
+    """Log all the line timestamps"""
+    def __init__(self, upstream):
+        super().__init__(upstream)
+        self._phases = []
+
+    def _receive_product(self) -> ProcessorProduct:
+        return super()._receive_product() # type: ignore
+
+    def run(self):
+        try:
+            while True:
+                with self._receive_product() as frame:
+                    self._phases.append(frame.phase)
+        except EndOfStream:
+            self._publish(None)
+
+    def save_data(self):
+        phases = np.array(self._phases).ravel()
+        plt.plot(phases)
+        plt.xlabel("Trigger number")
+        plt.ylabel("Phase (rad)")
+        plt.show()
         
 
 
 if __name__ == "__main__":
     # Use to reprocess raw saved datasets
-    fn = r"C:\Users\MIT\Documents\Dirigo\experiment.tif"
+    fn = r"D:\dirigo-data\2019-P-000791\1\1_scan_raw.tif"
 
     loader = StripAcquisitionLoader(fn)
+    # timestamper = LineTimestampLogger(upstream=loader)
     processor = RasterFrameProcessor(upstream=loader)
+    # phaser = PhaseLogger(upstream=processor)
     strip_processor = StripProcessor(upstream=processor)
+    strip_logger = TiffLogger(upstream=strip_processor)
+    strip_logger.frames_per_file = 100
     strip_stitcher = StripStitcher(upstream=strip_processor)
     tile_builder = TileBuilder(upstream=strip_stitcher)
     logger = PyramidLogger(upstream=tile_builder)
 
+    # loader.add_subscriber(timestamper)
     loader.add_subscriber(processor)
+    # processor.add_subscriber(phaser)
     processor.add_subscriber(strip_processor)
+    strip_processor.add_subscriber(strip_logger)
     strip_processor.add_subscriber(strip_stitcher)
     strip_stitcher.add_subscriber(tile_builder)
     tile_builder.add_subscriber(logger)
 
+    # timestamper.start()
     processor.start()
+    # phaser.start()
     strip_processor.start()
+    strip_logger.start()
     strip_stitcher.start()
     tile_builder.start()
     logger.start()
 
     loader.start()
 
-    logger.join(30)
+    strip_logger.join(30)
+
+    # phaser.save_data()

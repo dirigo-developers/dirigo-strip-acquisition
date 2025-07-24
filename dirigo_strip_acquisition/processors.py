@@ -74,7 +74,10 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
 
         self._spec: RasterScanStitchedAcquisitionSpec | LineCameraStitchedAcquisitionSpec
         self._acquisition: RasterScanStitchedAcquisition | LineCameraStitchedAcquisition
-        self._web_axis = self._acquisition._web_axis_stage.axis # TODO should be accessed via runtime
+        if isinstance(self._spec, RasterScanStitchedAcquisitionSpec):
+            self._scan_axis_label = self._acquisition.system_config.fast_raster_scanner['axis']
+        else:
+            self._scan_axis_label = self._acquisition.system_config.line_camera['axis']
         self._system_config = self._acquisition.system_config
         self._data_range = upstream.data_range
         self._positioner = self._acquisition.positioner
@@ -106,7 +109,7 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
                 with self._receive_product() as frame:
                     if frame.positions is None:
                         raise RuntimeError("Incoming frame missing encoder positions")
-                    if self._web_axis == "y":
+                    if self._scan_axis_label == "x":
                         positions = np.array(frame.positions[:,::-1]) # flip so order is (web[y], scan[x])
                     else:
                         positions = np.array(frame.positions)
@@ -216,9 +219,12 @@ class StripStitcher(Processor[StripProcessor]):
                         self._prev_strip = strip_product
                         continue
 
+                    # Seam average
+                    # Prev seam average
+
                     _linear_blend(self._prev_strip.data,
-                                strip_product.data,
-                                self._overlap_pixels)
+                                  strip_product.data,
+                                  self._overlap_pixels)
                     
                     with self._prev_strip: # this is the 2nd time this Product is entered, so it will release after this
                         self._publish(self._prev_strip)
@@ -237,32 +243,6 @@ class StripStitcher(Processor[StripProcessor]):
     @property
     def data_range(self) -> units.IntRange:
         return self._data_range
-
-
-# @njit(parallel=True, cache=True)
-# def _rotate90_inplace(a: np.ndarray, cw: bool = True):
-#     """
-#     In-place clockwise 90° rotation of a square array with channels.
-#     a.shape == (n, n, c)
-#     """
-#     n, _, c = a.shape
-#     # only iterate over the “top-left quadrant” of spatial indices:
-#     for i in prange(n//2):
-#         for j in range(n//2):
-#             for k in range(c):
-#                 tmp = a[i, j, k]
-#                 if cw:
-#                     # clockwise cycle
-#                     a[i, j, k]               = a[n-1-j, i, k]
-#                     a[n-1-j, i, k]           = a[n-1-i, n-1-j, k]
-#                     a[n-1-i, n-1-j, k]       = a[j, n-1-i, k]
-#                     a[j, n-1-i, k]           = tmp
-#                 else:
-#                     # counter-clockwise cycle
-#                     a[i, j, k]               = a[j, n-1-i, k]
-#                     a[j, n-1-i, k]           = a[n-1-i, n-1-j, k]
-#                     a[n-1-i, n-1-j, k]       = a[n-1-j, i, k]
-#                     a[n-1-j, i, k]           = tmp
 
 
 @njit(parallel=True)
