@@ -97,6 +97,8 @@ class RasterScanStripAcquisition(LineAcquisition):
                 self.hw.slow_raster_scanner.park()
 
             self.hw.encoders.stop()
+            self.hw.stages.x.move_to(init_pos[0])
+            self.hw.stages.y.move_to(init_pos[1])
 
 
     def read_positions(self):
@@ -318,6 +320,7 @@ class StitchedAcquisition(Acquisition, ABC):
                     self._scan_axis_stage.move_to(
                         self.positioner.scan_center(strip_index=strip_index + 1)
                     )
+                    print("MOVING TO", float(self.positioner.scan_center(strip_index=strip_index + 1)))
                 else:
                     time.sleep(units.Time('10 ms')) # Wait to be sure the stage is actually moving
 
