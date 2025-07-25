@@ -23,7 +23,7 @@ class PyramidLogger(Logger):
         self._acquisition: StitchedAcquisition
         
         self._n_channels = upstream.product_shape[2]
-        self._shape      = (*self._acquisition.final_shape[:2], self._n_channels)
+        self._shape      = (*self._acquisition.final_shape[:3], self._n_channels)
         self._dtype      = upstream.product_dtype
         self._tile_shape = upstream.product_shape[:2]
         self._levels     = levels
@@ -39,6 +39,7 @@ class PyramidLogger(Logger):
             planarconfig    = 'contig',
         )
         self._metadata={
+            'axes': 'ZYXS',
             'PhysicalSizeX': float(self._acquisition.spec.pixel_size),
             'PhysicalSizeXUnit': 'm',
             'PhysicalSizeY': float(self._acquisition.spec.pixel_size),
@@ -46,11 +47,14 @@ class PyramidLogger(Logger):
             'Channel': {'Name': ['Channel 1', 'Channel 2']}, # TODO, rename these out of system config
         }
         
+        # Pre-allocate for downsampled data (saved all at once after full-res)
         self._ds_tiles = []
         for d in self._levels[1:]:
+            # self._shape: (z, scan, web, channels)
             shape = (
-                math.ceil(self._shape[0] / d / self._tile_shape[0]),
-                math.ceil(self._shape[1] / d / self._tile_shape[1]),
+                self._shape[0],
+                math.ceil(self._shape[1] / d / self._tile_shape[0]),
+                math.ceil(self._shape[2] / d / self._tile_shape[1]),
                 self._tile_shape[0],
                 self._tile_shape[1],
                 self._n_channels
@@ -63,35 +67,37 @@ class PyramidLogger(Logger):
 
     def _tiles_gen(self) -> Iterator[np.ndarray]:
         """Yield tile data, blocking on queue."""
-        ntiles_scan = math.ceil(self._shape[0] / self._tile_shape[0])
-        ntiles_web  = math.ceil(self._shape[1] / self._tile_shape[1])
+        n_z         = self._shape[0]
+        ntiles_scan = math.ceil(self._shape[1] / self._tile_shape[0])
+        ntiles_web  = math.ceil(self._shape[2] / self._tile_shape[1])
         try:
-            for ti in range(ntiles_scan):
-                for tj in range(ntiles_web):
-                    with self._receive_product() as tile:
-                        
-                        # While we have the native res tile, do downsampling
-                        prev_f = 1
-                        prev_data = tile.data
-                        for lvl_idx, f in enumerate(self._levels[1:]):
-                            # calculate tile index in downsampled image
-                            di = ti // f
-                            dj = tj // f
-
-                            i0 = int( (ti / f - di) * self._tile_shape[0] )
-                            j0 = int( (tj / f - dj) * self._tile_shape[1] )
-                            i1 = i0 + self._tile_shape[0] // f
-                            j1 = j0 + self._tile_shape[1] // f
-
-                            df = f // prev_f
-                            self._ds_tiles[lvl_idx][di, dj, i0:i1, j0:j1 , :] = \
-                                downsample_kernel(prev_data, df)
-
-                            prev_f = f
-                            prev_data = self._ds_tiles[lvl_idx][di, dj, i0:i1, j0:j1 , :]
+            for z in range(n_z):
+                for ti in range(ntiles_scan):
+                    for tj in range(ntiles_web):
+                        with self._receive_product() as tile: # incoming tiles are 2D (+channel dim)
                             
-                        # yield full resolution data 
-                        yield tile.data  
+                            # While we have the full-res tile here, do downsampling
+                            prev_f = 1
+                            prev_data = tile.data
+                            for lvl_idx, f in enumerate(self._levels[1:]):
+                                # calculate tile index in downsampled image
+                                di = ti // f
+                                dj = tj // f
+
+                                i0 = int( (ti / f - di) * self._tile_shape[0] )
+                                j0 = int( (tj / f - dj) * self._tile_shape[1] )
+                                i1 = i0 + self._tile_shape[0] // f
+                                j1 = j0 + self._tile_shape[1] // f
+
+                                df = f // prev_f
+                                self._ds_tiles[lvl_idx][z, di, dj, i0:i1, j0:j1 , :] = \
+                                    downsample_kernel(prev_data, df)
+
+                                prev_f = f
+                                prev_data = self._ds_tiles[lvl_idx][z, di, dj, i0:i1, j0:j1 , :]
+                                
+                            # yield full resolution data 
+                            yield tile.data  
 
         except EndOfStream:
             self._publish(None)
@@ -99,12 +105,13 @@ class PyramidLogger(Logger):
     def _downsampled_tiles_gen(self, level_idx) -> Iterator[np.ndarray]:
         # Get the tiles corresponding to a particular downsampled level
         ds_tiles = self._ds_tiles[level_idx]
-        n_rows, n_cols = ds_tiles.shape[:2]
+        n_z, n_rows, n_cols = ds_tiles.shape[:3]
 
         try:
-            for ti in range(n_rows):
-                for tj in range(n_cols):
-                    yield ds_tiles[ti, tj, ...]
+            for z in range(n_z):
+                for ti in range(n_rows):
+                    for tj in range(n_cols):
+                        yield ds_tiles[z, ti, tj, ...]
         except GeneratorExit:
             pass
 
@@ -133,10 +140,10 @@ class PyramidLogger(Logger):
 
             # write downsampled levels
             for level_idx, f in enumerate(self._levels[1:]):
-                d_h, d_w = math.ceil(self._shape[0] / f), math.ceil(self._shape[1] / f)
+                n_z, d_h, d_w = self._shape[0], math.ceil(self._shape[1] / f), math.ceil(self._shape[2] / f)
                 tif.write(
                     self._downsampled_tiles_gen(level_idx),
-                    shape=(d_h, d_w, self._n_channels),
+                    shape=(n_z, d_h, d_w, self._n_channels),
                     subfiletype=1,
                     **self._options # type: ignore
                 )

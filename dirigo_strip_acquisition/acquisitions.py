@@ -97,8 +97,6 @@ class RasterScanStripAcquisition(LineAcquisition):
                 self.hw.slow_raster_scanner.park()
 
             self.hw.encoders.stop()
-            self.hw.stages.x.move_to(init_pos[0])
-            self.hw.stages.y.move_to(init_pos[1])
 
 
     def read_positions(self):
@@ -189,6 +187,8 @@ class StitchedAcquisitionSpec(AcquisitionSpec):
     def __init__(self, 
                  x_range: units.PositionRange | dict, 
                  y_range: units.PositionRange | dict, 
+                 z_range: units.PositionRange | dict, 
+                 z_step: units.Position | str,
                  strip_overlap: float = 0.05
                  ) -> None:
         
@@ -202,9 +202,23 @@ class StitchedAcquisitionSpec(AcquisitionSpec):
         else:
             self.y_range = units.PositionRange(**y_range)
 
+        if isinstance(z_range, units.PositionRange):
+            self.z_range = z_range
+        else:
+            self.z_range = units.PositionRange(**z_range)
+        
+        if isinstance(z_step, units.Position):
+            self.z_step = z_step
+        else:
+            self.z_step = units.Position(z_step)
+
         if not (0 <= strip_overlap < 1):
             raise ValueError(f"`overlap` must be a float between 0 and 1")
         self.strip_overlap = strip_overlap
+
+    @cached_property
+    def z_steps(self) -> int:
+        return math.ceil( abs(self.z_range.range / self.z_step) )
       
 
 class StitchedAcquisition(Acquisition, ABC):
@@ -257,11 +271,11 @@ class StitchedAcquisition(Acquisition, ABC):
             line_width=self._strip_acquisition.spec.line_width, # TODO, remove line_width since it's already in spec
             spec=spec
         )
-        self._final_shape = (n_pixels_scan, n_pixels_web, n_channels) 
+        self._final_shape = (self.spec.z_steps, n_pixels_scan, n_pixels_web, n_channels) 
 
     @property
-    def final_shape(self) -> tuple[int,int,int]:
-        """Shape of the final stitched image with dimensions: (scan, web, chan)"""
+    def final_shape(self) -> tuple[int,int,int,int]:
+        """Shape of the final stitched image with dimensions: (z, scan, web, chan)"""
         return self._final_shape
         
     @abstractmethod
@@ -279,18 +293,29 @@ class StitchedAcquisition(Acquisition, ABC):
         self._strip_acquisition.add_subscriber(subscriber)
 
     def run(self):
-        # move to start (2 axes)
-        self._scan_axis_stage.move_to(self.positioner.scan_center(strip_index=0))
+        original_position = (
+            self.hw.stages.x.position, 
+            self.hw.stages.y.position,
+            self.hw.objective_z_scanner.position
+        )
+        # move to start (2 axes + objective z scanner)
+        self.hw.objective_z_scanner.move_to(self.spec.z_range.min)
+        self._scan_axis_stage.move_to(
+            self.positioner.scan_center(strip_index=0)
+        )
         self._web_axis_stage.move_to(
             self.positioner.web_limits.min - self.spec.pixel_size # a bit extra movement to be sure we trigger enough samples
         )
+        #print(f"Are stages moving. Scan {self._scan_axis_stage.moving}")
+        #print(f"Are stages moving. Web {self._web_axis_stage.moving}")
+        time.sleep(0.050) # to make certain the stages have started moving
         self._scan_axis_stage.wait_until_move_finished()
         self._web_axis_stage.wait_until_move_finished()
 
         # set strip velocity
         self._original_web_velocity = self._web_axis_stage.max_velocity
         self._web_axis_stage.max_velocity = self._web_velocity
-        _ = self._web_period # cache _web_period
+        _ = self._web_period # caches _web_period
 
         # start line acquisition & hold until it is 'active' (prevents premature movements)
         self._strip_acquisition.start() 
@@ -298,41 +323,81 @@ class StitchedAcquisition(Acquisition, ABC):
             time.sleep(0.001) # wait (active event indicates data is acquiring)
 
         try:
-            for strip_index in range(self.positioner.n_strips):
-                self.reset_encoders("forward" if (strip_index % 2) == 0 else "reverse")
+            for z_index in range(self.spec.z_steps):
 
-                if self._stop_event.is_set():
-                    break # Terminate acquisitions
+                for strip_index in range(self.positioner.n_strips):
+                    if self._stop_event.is_set():
+                        break # Terminate acquisitions
 
-                # start web axis movement
-                if strip_index % 2:
-                    strip_end_position = self.positioner.web_limits.min - self.spec.pixel_size
-                else:
-                    strip_end_position = self.positioner.web_limits.max
+                    self.reset_encoders("forward" if (strip_index % 2) == 0 else "reverse")
+                    print(f"Starting strip {strip_index} of {self.positioner.n_strips}")
 
-                self._web_axis_stage.move_to(strip_end_position)
+                    # start web axis movement
+                    if strip_index % 2:
+                        strip_end_position = self.positioner.web_limits.min - self.spec.pixel_size
+                    else:
+                        strip_end_position = self.positioner.web_limits.max
 
-                if strip_index < (self.positioner.n_strips - 1):
-                    # wait until web axis decceleration
-                    time.sleep(self._web_period + units.Time('0 ms')) # the last part is empirical
+                    self._web_axis_stage.move_to(strip_end_position)
 
-                    # begin lateral movement to the next strip
-                    self._scan_axis_stage.move_to(
-                        self.positioner.scan_center(strip_index=strip_index + 1)
+                    if strip_index < (self.positioner.n_strips - 1):
+                        # wait until web axis decceleration
+                        time.sleep(self._web_period)
+
+                        # begin lateral movement to the next strip
+                        self._scan_axis_stage.move_to(
+                            self.positioner.scan_center(strip_index=strip_index + 1)
+                        )
+                        #print("MOVING TO", float(self.positioner.scan_center(strip_index=strip_index + 1)))
+                    else:
+                        time.sleep(0.050) # Wait to be sure the stage is actually moving
+
+                    # wait for web axis movement to come to complete stop
+                    self._web_axis_stage.wait_until_move_finished()
+                
+                if z_index < (self.spec.z_steps - 1): # if not on last z level
+                    
+                    # Change web axis velocity (usually faster)
+                    self._web_axis_stage.max_velocity = self._original_web_velocity
+
+                    # Move Z
+                    self.hw.objective_z_scanner.move_to(
+                        self.spec.z_range.min + (z_index+1) * self.spec.z_step
                     )
-                    print("MOVING TO", float(self.positioner.scan_center(strip_index=strip_index + 1)))
-                else:
-                    time.sleep(units.Time('10 ms')) # Wait to be sure the stage is actually moving
 
-                # wait for web axis movement to come to complete stop
-                self._web_axis_stage.wait_until_move_finished()
+                    # Move back to XY starting point
+                    self._scan_axis_stage.move_to(
+                        self.positioner.scan_center(strip_index=0)
+                    )
+                    self._web_axis_stage.move_to(
+                        self.positioner.web_limits.min - self.spec.pixel_size
+                    )
+
+                    time.sleep(0.050) # to make certain the stages have started moving
+                    self._scan_axis_stage.wait_until_move_finished()
+                    self._web_axis_stage.wait_until_move_finished()
+
+                    # Set acquisition web axis velocity
+                    self._web_axis_stage.max_velocity = self._web_velocity
 
         finally:
             # Stop the line acquisition Worker
             self._strip_acquisition.stop()
 
+            if self.hw.stages.x.moving:
+                self.hw.stages.x.stop()
+            if self.hw.stages.y.moving:
+                self.hw.stages.y.stop()
+
             # Revert the web axis velocity
             self._web_axis_stage.max_velocity = self._original_web_velocity
+
+            # Return to original position
+            self.hw.stages.x.wait_until_move_finished()
+            self.hw.stages.y.wait_until_move_finished()
+            self.hw.stages.x.move_to(original_position[0])
+            self.hw.stages.y.move_to(original_position[1])
+            self.hw.objective_z_scanner.move_to(original_position[2])
 
     def reset_encoders(self, direction: Literal['forward', 'reverse']):
         """Provide subclass implementation to start a camera trigger"""
@@ -369,6 +434,8 @@ class RasterScanStitchedAcquisitionSpec(StitchedAcquisitionSpec, RasterScanStrip
     def __init__(self,
                  x_range: units.PositionRange | dict,
                  y_range: units.PositionRange | dict,
+                 z_range: units.PositionRange | dict,
+                 z_step: units.Position | str,
                  strip_overlap: float,
                  line_width: units.Position | str,
                  pixel_size: units.Position | str,
@@ -380,6 +447,8 @@ class RasterScanStitchedAcquisitionSpec(StitchedAcquisitionSpec, RasterScanStrip
             self,
             x_range=x_range,
             y_range=y_range,
+            z_range=z_range,
+            z_step=z_step,
             strip_overlap=strip_overlap
         )
         RasterScanStripAcquisitionSpec.__init__(
@@ -410,6 +479,8 @@ class LineCameraStitchedAcquisitionSpec(StitchedAcquisitionSpec, LineCameraStrip
     def __init__(self,
                  x_range: units.PositionRange | dict,
                  y_range: units.PositionRange | dict,
+                 z_range: units.PositionRange | dict,
+                 z_step: units.Position | str,
                  strip_overlap: float,
                  line_width: units.Position | str,
                  pixel_size: units.Position | str,
@@ -421,6 +492,8 @@ class LineCameraStitchedAcquisitionSpec(StitchedAcquisitionSpec, LineCameraStrip
             self,
             x_range=x_range,
             y_range=y_range,
+            z_range=z_range,
+            z_step=z_step,
             strip_overlap=strip_overlap
         )
         LineCameraStripAcquisitionSpec.__init__(

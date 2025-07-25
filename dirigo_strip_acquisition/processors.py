@@ -68,7 +68,6 @@ def _line_placement_kernel(strip: np.ndarray,     # dim order (web, scan, chan)
 
 
 class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be used with a LineCamera Processor (not limited to raster)
-    """  """
     def __init__(self, upstream: RasterFrameProcessor):
         super().__init__(upstream)
 
@@ -86,92 +85,115 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
         prev_position = (self._positioner.web_min(0), self._positioner.scan_center(0))
         self._prev_position = np.array(prev_position, dtype=np.float64)
 
-        self._strip_shape = ( # strips are assembled in dim order: (web, scan, chan)
-            self._acquisition.final_shape[1], # final_shape[1]: pixels in web dimension
+        # _acquisition.final_shape: (z, scan, web, channel)
+        self._strip_shape = ( # WARNING strips are assembled in dim order: (web, scan, chan)
+            self._acquisition.final_shape[2],
             self._spec.pixels_per_line,
-            self._acquisition.final_shape[2]
+            self._acquisition.final_shape[3]
         )
 
         self._init_product_pool(n=4, shape=self._strip_shape, dtype=np.int16)
         
-        self._strip_idx = 0
         self._prev_row = -1 # increments as _line_placement_kernel is called
 
     def _receive_product(self) -> ProcessorProduct:
         return super()._receive_product() # type: ignore
     
     def run(self):
+        scan_transl = self._positioner.scan_center(1) - self._positioner.scan_center(0)  
         try:
             strip = self._get_free_product()
-            strip.data[...] = 0 # TODO, check performance impact of this
+            strip.data[...] = 0         # TODO, check performance impact of this
 
-            while True:
-                with self._receive_product() as frame:
-                    if frame.positions is None:
-                        raise RuntimeError("Incoming frame missing encoder positions")
-                    if self._scan_axis_label == "x":
-                        positions = np.array(frame.positions[:,::-1]) # flip so order is (web[y], scan[x])
-                    else:
-                        positions = np.array(frame.positions)
+            for z_index in range(self._spec.z_steps):
+                for strip_index in range(self._positioner.n_strips):
+                    
+                    while True:
+                        # Collect a number of frames and put lines into strip;
+                        # sense movement to the next strip -> break
+                        with self._receive_product() as frame:
+                            if frame.positions is None:
+                                raise RuntimeError("Incoming frame missing encoder positions")
+                            if self._scan_axis_label == "x":
+                                positions = np.array(frame.positions[:,::-1]) # flip so order is (web[y], scan[x])
+                            else:
+                                positions = np.array(frame.positions)
 
-                    strip_center_min = np.array([[
-                        self._positioner.web_min(self._strip_idx),        
-                        self._positioner.scan_center(self._strip_idx)                        
-                    ]])
-                    strip_positions = positions - strip_center_min # (web, scan)
+                            strip_center_min = np.array([[
+                                self._positioner.web_min(strip_index),        
+                                self._positioner.scan_center(strip_index)                        
+                            ]])
+                            strip_positions = positions - strip_center_min # (web, scan)
 
-                    # Check whether this frame includes move to next strip
-                    translation = self._positioner.scan_center(self._strip_idx + 1) - self._positioner.scan_center(self._strip_idx)
-                    next_strip = round(strip_positions[-1, 1] / translation) > 0
+                            # Check if frame includes move to next z step or next strip
+                            next_z = round(strip_positions[-1, 1] / scan_transl) < 0    # TODO, this would fail for 1-strip wide acquisitions
+                            next_strip = round(strip_positions[-1, 1] / scan_transl) > 0
 
-                    if next_strip:
-                        # if we know there is next strip data in this product,
-                        # blank out lines moving in opposite direction
-                        direction = 1 if (self._strip_idx % 2 == 0) else -1
-                        b = np.diff(strip_positions[:,0]) * direction < 0 # bool array of lines with opposite web velo sign
-                        b = np.insert(b, 0, False)
-                        strip_positions[b] = 0
+                            if next_z or next_strip:
+                                # we know there is next strip data in this product,
+                                # blank out lines moving in opposite direction
+                                direction = 1 if (strip_index % 2 == 0) else -1
+                                b = np.diff(strip_positions[:,0]) * direction < 0 # bool array of lines with opposite web velo sign
+                                b = np.insert(b, 0, False)
+                                strip_positions[b] = 0
 
-                    self._prev_row = _line_placement_kernel( # add lines to strip
-                        strip=strip.data, 
-                        lines=frame.data,
-                        positions=strip_positions,
-                        pixel_size=self._spec.pixel_size,
-                        prev_row=self._prev_row,
-                        flip_line=False
-                    )
+                            # add lines to current strip
+                            self._prev_row = _line_placement_kernel( 
+                                strip=strip.data, 
+                                lines=frame.data,
+                                positions=strip_positions,
+                                pixel_size=self._spec.pixel_size,
+                                prev_row=self._prev_row,
+                                flip_line=False
+                            )
 
-                    if next_strip:
-                        # Moving to next strip, publish
-                        print(f"Publishing strip {self._strip_idx} with size: {strip.data.shape}")
-                        self._publish(strip)
-                        self._strip_idx += 1
+                            if next_z or next_strip:
+                                # Moving to next strip, publish
+                                if next_z:
+                                    # Next z movement may take a number of frames to reach XY starting point
+                                    scan_pos_relative_strip_0 = positions[-1, 1] - self._positioner.scan_center(0)
+                                    if round(scan_pos_relative_strip_0 / scan_transl) != 0:
+                                        # haven't made it back to XY starting point
+                                        continue
+                                    else:
+                                        # or we have made it back to XY starting point
+                                        new_strip_index = 0 # starting over from strip 0
+                                else:
+                                    # next strip
+                                    new_strip_index = strip_index + 1
 
-                        strip = self._get_free_product()
-                        strip.data[...] = 0 # TODO, remove this if we can ensure complete overwrite of previous data
+                                # publish the completed strip
+                                print(f"Publishing strip {z_index, strip_index} with size: {strip.data.shape}")
+                                strip.indices = (z_index, strip_index)
+                                self._publish(strip)
 
-                        # add any leftover lines to new strip
-                        strip_center_min = np.array([
-                            self._positioner.web_min(self._strip_idx),
-                            self._positioner.scan_center(self._strip_idx)                            
-                        ])
-                        strip_positions = positions - strip_center_min[np.newaxis,:]
-                        
-                        self._prev_row = _line_placement_kernel( 
-                            strip=strip.data, 
-                            lines=frame.data,
-                            positions=strip_positions,
-                            pixel_size=self._spec.pixel_size,
-                            prev_row=self._prev_row,
-                            flip_line=False
-                        )
+                                strip = self._get_free_product()
+                                strip.data[...] = 0 # TODO, remove this if we can ensure complete overwrite of previous data
 
-        # The only way out of above while loop is to encounter EndOfStream in _receive_product()                
+                                # add any leftover lines to new strip
+                                strip_center_min = np.array([
+                                    self._positioner.web_min(new_strip_index),
+                                    self._positioner.scan_center(new_strip_index)                            
+                                ])
+                                strip_positions = positions - strip_center_min[np.newaxis,:]
+                                
+                                self._prev_row = _line_placement_kernel( 
+                                    strip=strip.data, 
+                                    lines=frame.data,
+                                    positions=strip_positions,
+                                    pixel_size=self._spec.pixel_size,
+                                    prev_row=self._prev_row,
+                                    flip_line=False
+                                )
+                                break
+
         except EndOfStream:
             # publish final strip (completed or not)
-            print(f"Publishing FINAL strip {self._strip_idx} with size: {strip.data.shape}")
+            print(f"Publishing final strip {z_index, strip_index} with size: {strip.data.shape}")
+            strip.indices = (z_index, strip_index)
             self._publish(strip)
 
+        finally:
             # send shutdown sentinel
             self._publish(None)
     
@@ -197,11 +219,17 @@ def _linear_blend(strip_a: np.ndarray, strip_b: np.ndarray, overlap_px: int):
 
 
 class StripStitcher(Processor[StripProcessor]):
+    """
+    Blends edges of consecutive strips. 
+    
+    Note that this works in-place on the strip data (not copied).
+    """
     def __init__(self, upstream: StripProcessor):
         super().__init__(upstream)
         self._data_range = upstream.data_range
 
         self._spec: RasterScanStitchedAcquisitionSpec | LineCameraStitchedAcquisitionSpec
+        self._n_strips = upstream._positioner.n_strips
         self._overlap_pixels = round(self._spec.strip_overlap * self._spec.pixels_per_line)
         self._prev_strip = None
 
@@ -212,31 +240,42 @@ class StripStitcher(Processor[StripProcessor]):
         try:
             while True:
                 with self._receive_product() as strip_product:
+                    if strip_product.indices is None:
+                        raise RuntimeError("Strip products must include indices.")
                     strip_product.hold_once() # product won't be released until it is opened again
 
-                    if self._prev_strip is None:
+                    if (self._prev_strip is None):
                         # we need one more strip to start blending
                         self._prev_strip = strip_product
                         continue
 
-                    # Seam average
-                    # Prev seam average
+                    # TODO calculate Seam average
+                    # TODO calculate Prev seam average
 
                     _linear_blend(self._prev_strip.data,
                                   strip_product.data,
                                   self._overlap_pixels)
                     
                     with self._prev_strip: # this is the 2nd time this Product is entered, so it will release after this
+                        print(f"Republishing strip {self._prev_strip.indices}")
                         self._publish(self._prev_strip)
                         # publish increments product._remaining
                         # exiting context manager decrements product._remaining
                         # for 1 subscriber, net = 0; product not returned to pool
 
-                    self._prev_strip = strip_product
+                    if strip_product.indices[1] == self._n_strips - 1:
+                        # on last strip of the z level, publish last strip
+                        with strip_product:     # make sure to release the product
+                            print(f"Republishing strip {strip_product.indices}")
+                            self._publish(strip_product) 
+                        self._prev_strip = None
+                    else:
+                        self._prev_strip = strip_product
 
         except EndOfStream:
             if self._prev_strip is not None:
                 with self._prev_strip:
+                    print(f"Republishing strip {self._prev_strip.indices}")
                     self._publish(self._prev_strip)
             self._publish(None)
 
@@ -286,13 +325,14 @@ class TileBuilder(Processor[StripStitcher]):
 
         self._data_range = upstream.data_range
         self._tile_shape = tile_shape
-        self._n_channels = self._acquisition.final_shape[2]
+        self._n_channels = self._acquisition.final_shape[-1] # (z, scan, web, chan)
 
         self._init_product_pool(n=4, shape=(*self._tile_shape, self._n_channels), dtype=np.int16)
 
-        self._tiles_web  = math.ceil(self._acquisition.final_shape[1] / tile_shape[0]) # tiles along the web dimension (strip long axis)
-        self._tiles_scan = math.ceil(self._acquisition.final_shape[0] / tile_shape[0]) # tiles along the scan dimension (strip short axis)
-        
+        self._tiles_web  = math.ceil(self._acquisition.final_shape[-2] / tile_shape[0]) # tiles along the web dimension (strip long axis)
+        self._tiles_scan = math.ceil(self._acquisition.final_shape[-3] / tile_shape[0]) # tiles along the scan dimension (strip short axis)
+        self._tiles_image = self._tiles_web * self._tiles_scan
+
         self._leftovers: Optional[np.ndarray] = None
 
     def _receive_product(self) -> ProcessorProduct:
@@ -300,7 +340,7 @@ class TileBuilder(Processor[StripStitcher]):
         
     def run(self):
         tile_idx = 0
-        strip_idx = 0
+        t_z = 0                                             # tile coordinate z dim
 
         tile_shape = self._tile_shape
         effective_pixels_per_line = int(
@@ -310,29 +350,35 @@ class TileBuilder(Processor[StripStitcher]):
         try:
             while True:
                 with self._receive_product() as strip:
+                    if strip.indices is None:
+                        raise RuntimeError("Strip must include indices")
 
                     while True:
-                        t_w = tile_idx %  self._tiles_web # tile coordinate web dim
-                        t_s = tile_idx // self._tiles_web # tile coordinate scan dim
+                        t_w = tile_idx %  self._tiles_web   # tile coordinate web dim
+                        t_s = tile_idx // self._tiles_web   # tile coordinate scan dim
 
                         if t_s >= self._tiles_scan: 
-                            raise EndOfStream
+                            # reset leftovers and break to move on to next z
+                            self._leftovers = None
+                            tile_idx = 0
+                            t_z += 1
+                            break
                         
                         w = t_w * tile_shape[0]   # web dim global pixel coordinate
                         s = t_s * tile_shape[1]   # scan dim global pixel coordinate
-                        scan_offset = strip_idx * effective_pixels_per_line 
+                        scan_offset = strip.indices[1] * effective_pixels_per_line 
 
                         s_o = s - scan_offset   # scan pixel coordinate relative to the current strip
                         
                         if (s_o + tile_shape[1]) > strip.data.shape[1]:
-                            # If the next tile exceeds current strip dimensions, 
-                            # store leftovers and break to move on to next strip
+                            # If the start of next tile will exceed current strip 
+                            # dimensions, store leftovers and break to move on to 
+                            # next strip
                             self._leftovers = strip.data[:, s_o:, :].copy()
-                            strip_idx += 1
                             break
 
                         tile = self.get_free_product()
-                        tile.coords = (t_s, t_w)
+                        tile.coords = (t_z, t_s, t_w)
                         tile.data[...] = 0      # clear old tile data                   
 
                         if s_o >= 0:
@@ -363,9 +409,8 @@ class TileBuilder(Processor[StripStitcher]):
                         
                         if self._acquisition.system_config.fast_raster_scanner['axis'] == "x":
                             _transpose_inplace(tile.data)
-                            #_rotate90_inplace(tile.data, False)
 
-                        #print(f"Publishing tile {tile_idx}: ({t_s},{t_w}), shape: {tile.data.shape}, dtype: {tile.data.dtype}")
+                        # print(f"Publishing tile {t_z,t_s,t_w}, shape: {tile.data.shape}")
                         self._publish(tile)
                         tile_idx += 1
 
@@ -422,22 +467,24 @@ class StitchedPreview(Processor):
                  downsample: int = 16,
                  **kwargs):
         super().__init__(upstream, **kwargs)
-        self._hold = True # effectively holds off starting run loop
+        self._hold = True # effectively holds off starting run loop until a subscriber is added
         self._acquisition: RasterScanStitchedAcquisition
         self._data_range = upstream.data_range
         self._downsample = downsample
 
         # Product is a downsampled version of the full stitched image       
         self._downsampled_tile_length = upstream.product_shape[0] // downsample
+        # _acquisition.final_shape (z, scan, web, channel)
         self._tiles_scan = math.ceil(
-            self._acquisition.final_shape[0] / upstream.product_shape[0]
-        )
-        self._tiles_web  = math.ceil(
             self._acquisition.final_shape[1] / upstream.product_shape[0]
         )
+        self._tiles_web  = math.ceil(
+            self._acquisition.final_shape[2] / upstream.product_shape[0]
+        )
+        self._z_levels = self._acquisition.final_shape[0]
         preview_shape = (self._tiles_scan * self._downsampled_tile_length, 
                          self._tiles_web  * self._downsampled_tile_length,
-                         self._acquisition.final_shape[2])     # (scan, web)
+                         self._acquisition.final_shape[3])
 
         self._init_product_pool(
             n       = 1, 
@@ -445,7 +492,7 @@ class StitchedPreview(Processor):
             dtype   = self.data_range.recommended_dtype,
         )
 
-    def _receive_product(self) -> ProcessorProduct:
+    def _receive_product(self) -> TileProduct:
         return super()._receive_product() # type: ignore
     
     def run(self):
@@ -453,24 +500,26 @@ class StitchedPreview(Processor):
             # trick to avoid deadlock: getting stuck at _receive_product()
             time.sleep(0.05)
         try:
-            for ts in range(self._tiles_scan):
-                # Get the preview product from the pool
-                preview = self._get_free_product()
+            for tz in range(self._z_levels):
+                for ts in range(self._tiles_scan):
+                    # Get the preview product from the pool
+                    preview = self._get_free_product()
 
-                # work through all the tiles along the web direction, then publish
-                for tw in range(self._tiles_web):
+                    # work through all the tiles along the web direction, then publish
+                    for tw in range(self._tiles_web):
 
-                    with self._receive_product() as tile:
-                        i0 = ts * self._downsampled_tile_length
-                        j0 = tw * self._downsampled_tile_length
-                        i1 = i0 + self._downsampled_tile_length
-                        j1 = j0 + self._downsampled_tile_length
-                        # downsample and place in array
-                        preview.data[i0:i1, j0:j1, :] = \
-                            downsample_kernel(tile.data, self._downsample)
+                        with self._receive_product() as tile:
+                            #print(f"Tile's indices {tile.coords}, Our indices {tz,ts,tw}")
+                            i0 = ts * self._downsampled_tile_length
+                            j0 = tw * self._downsampled_tile_length
+                            i1 = i0 + self._downsampled_tile_length
+                            j1 = j0 + self._downsampled_tile_length
+                            # downsample and place in array
+                            preview.data[i0:i1, j0:j1, :] = \
+                                downsample_kernel(tile.data, self._downsample)
 
-                self._publish(preview)
-                print("Published preview(s) on scan row", ts)
+                    self._publish(preview)
+                    # print(f"Published preview(s) on scan row {ts} of {self._tiles_scan}")
 
             self._publish(None) # forward sentinel None
 
