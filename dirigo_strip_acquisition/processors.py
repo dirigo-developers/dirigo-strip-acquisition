@@ -1,7 +1,7 @@
 import math, time
 from typing import Optional
 
-from numba import njit, prange, int16, uint8, uint16, float64, int64, boolean
+from numba import njit, prange, int16, uint8, uint16, float32, float64, int64, boolean
 import numpy as np
 from numpy.polynomial.polynomial import Polynomial
 
@@ -68,6 +68,7 @@ def _line_placement_kernel(strip: np.ndarray,     # dim order (web, scan, chan)
 
 
 class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be used with a LineCamera Processor (not limited to raster)
+    """Receives position-encoded line data and places lines into strip."""
     def __init__(self, upstream: RasterFrameProcessor):
         super().__init__(upstream)
 
@@ -230,13 +231,16 @@ class StripStitcher(Processor[StripProcessor]):
 
         self._spec: RasterScanStitchedAcquisitionSpec | LineCameraStitchedAcquisitionSpec
         self._n_strips = upstream._positioner.n_strips
+        self._strip_height = upstream.product_shape[0]
+        self._strip_dtype = upstream.product_dtype
         self._overlap_pixels = round(self._spec.strip_overlap * self._spec.pixels_per_line)
-        self._prev_strip = None
 
     def _receive_product(self) -> ProcessorProduct:
         return super()._receive_product() # type: ignore
 
     def run(self):
+        w = self._overlap_pixels
+        prev_correction = 1
         try:
             while True:
                 with self._receive_product() as strip_product:
@@ -244,21 +248,34 @@ class StripStitcher(Processor[StripProcessor]):
                         raise RuntimeError("Strip products must include indices.")
                     strip_product.hold_once() # product won't be released until it is opened again
 
-                    if (self._prev_strip is None):
+                    if strip_product.indices[1] == 0:
                         # we need one more strip to start blending
-                        self._prev_strip = strip_product
+                        prev_strip = strip_product
                         continue
 
-                    # TODO calculate Seam average
-                    # TODO calculate Prev seam average
+                    a, b = prev_strip.data, strip_product.data
 
-                    _linear_blend(self._prev_strip.data,
-                                  strip_product.data,
-                                  self._overlap_pixels)
+                    # Field flattening
+                    a_end   = np.average(a[:, -w:-1, :], axis=(1,2))
+                    b_start = np.average(b[:, 1:w, :], axis=(1,2))
+                    seam_avg = (a_end + b_start) / 2
+
+                    a_correction = seam_avg / a_end
+                    a_correction = np.median(a_correction[~np.isnan(a_correction)])
+                    b_correction = seam_avg / b_start
+                    b_correction = np.median(b_correction[~np.isnan(b_correction)])
+                    correction = np.linspace(prev_correction, a_correction, a.shape[1])
+                    a[...] = (a * correction[None,:,None]).astype(np.int16)
+
+                    prev_correction = b_correction
+
+                    # Blend the edges
+                    _linear_blend(a, b, w)
                     
-                    with self._prev_strip: # this is the 2nd time this Product is entered, so it will release after this
-                        print(f"Republishing strip {self._prev_strip.indices}")
-                        self._publish(self._prev_strip)
+                    with prev_strip: # type: ignore
+                        # this is the 2nd time this Product is entered, so it will release after this
+                        print(f"Republishing strip {prev_strip.indices}")
+                        self._publish(prev_strip)
                         # publish increments product._remaining
                         # exiting context manager decrements product._remaining
                         # for 1 subscriber, net = 0; product not returned to pool
@@ -266,17 +283,22 @@ class StripStitcher(Processor[StripProcessor]):
                     if strip_product.indices[1] == self._n_strips - 1:
                         # on last strip of the z level, publish last strip
                         with strip_product:     # make sure to release the product
+                            correction = np.linspace(prev_correction, 1, b.shape[1])
+                            b[...] = (b * correction[None,:,None]).astype(np.int16)
+
                             print(f"Republishing strip {strip_product.indices}")
                             self._publish(strip_product) 
-                        self._prev_strip = None
+                        prev_correction = 1
                     else:
-                        self._prev_strip = strip_product
+                        prev_strip = strip_product
 
         except EndOfStream:
-            if self._prev_strip is not None:
-                with self._prev_strip:
-                    print(f"Republishing strip {self._prev_strip.indices}")
-                    self._publish(self._prev_strip)
+            try:
+                with prev_strip: # type: ignore
+                    print(f"Republishing strip {prev_strip.indices}")
+                    self._publish(prev_strip)
+            except UnboundLocalError:
+                pass
             self._publish(None)
 
     @property

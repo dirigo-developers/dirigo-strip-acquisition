@@ -18,9 +18,12 @@ class PyramidLogger(Logger):
     def __init__(self, 
                  upstream: TileBuilder, 
                  levels: tuple = (1, 2, 8),
+                 basename: str = "experiment",
                  compression: Optional[None] = None):
-        super().__init__(upstream)
+        super().__init__(upstream, basename)
         self._acquisition: StitchedAcquisition
+
+        self.file_ext = "ome.tif"
         
         self._n_channels = upstream.product_shape[2]
         self._shape      = (*self._acquisition.final_shape[:3], self._n_channels)
@@ -128,7 +131,7 @@ class PyramidLogger(Logger):
             # Spin while waiting for acquisition to start
             time.sleep(0.01)
 
-        fp = self.save_path / f"{self.basename}.ome.tif"
+        fp = self._file_path()
         with tifffile.TiffWriter(fp, bigtiff=True) as tif:
             tif.write(
                 self._tiles_gen(),
