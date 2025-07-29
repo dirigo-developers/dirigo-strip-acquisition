@@ -201,22 +201,7 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
     @property
     def data_range(self) -> units.IntRange:
         return self._data_range
-
-
-def _linear_blend(strip_a: np.ndarray, strip_b: np.ndarray, overlap_px: int):
-    """Blend the right `overlap_px` columns of `strip_a`
-       with the left `overlap_px` columns of `strip_b`."""
-    if overlap_px > 0:
-        w = overlap_px
-        alpha = np.linspace(0, 1, w, dtype=np.float32)[np.newaxis, :, np.newaxis]  # (1,w,1)
-
-        strip_a_end = strip_a[:, -w:, :].astype(np.float32)
-        strip_b_start = strip_b[:, :w, :].astype(np.float32)
-
-        blended = ((1 - alpha) * strip_a_end + alpha * strip_b_start).astype(strip_a.dtype)
-
-        strip_a[:, -w:, :] = blended
-        strip_b[:, :w,  :] = blended
+    
 
 
 class StripStitcher(Processor[StripProcessor]):
@@ -243,34 +228,56 @@ class StripStitcher(Processor[StripProcessor]):
         prev_correction = 1
         try:
             while True:
-                with self._receive_product() as strip_product:
-                    if strip_product.indices is None:
+                with self._receive_product() as strip:
+                    if strip.indices is None:
                         raise RuntimeError("Strip products must include indices.")
-                    strip_product.hold_once() # product won't be released until it is opened again
+                    strip.hold_once() # product won't be released until it is opened again
 
-                    if strip_product.indices[1] == 0:
+                    if strip.indices[1] == 0:
                         # we need one more strip to start blending
-                        prev_strip = strip_product
+                        prev_strip = strip
                         continue
 
-                    a, b = prev_strip.data, strip_product.data
+                    a, b = prev_strip.data, strip.data
+
+                    # # TEST
+                    # prof = np.median(a, axis=(0,2))
+                    # x = np.arange(-len(prof)//2, len(prof)//2)
+                    # coeffs = np.polyfit(x, prof, 2)
+                    # print(coeffs[0] / coeffs[2])
 
                     # Field flattening
                     a_end   = np.average(a[:, -w:-1, :], axis=(1,2))
                     b_start = np.average(b[:, 1:w, :], axis=(1,2))
+
+                    # center  = np.average(a[:, 495:505, :], axis=(1,2))
+                    # print( np.median(center[a_end>100] / a_end[a_end>100]) )
                     seam_avg = (a_end + b_start) / 2
 
                     a_correction = seam_avg / a_end
-                    a_correction = np.median(a_correction[~np.isnan(a_correction)])
+                    a_correction = a_correction[~np.isnan(a_correction) & (a_end > 60)]
+                    a_correction = np.median(a_correction)
+
                     b_correction = seam_avg / b_start
+                    b_correction = b_correction[~np.isnan(b_correction) & (b_start > 60)]
                     b_correction = np.median(b_correction[~np.isnan(b_correction)])
+
                     correction = np.linspace(prev_correction, a_correction, a.shape[1])
                     a[...] = (a * correction[None,:,None]).astype(np.int16)
 
                     prev_correction = b_correction
 
                     # Blend the edges
-                    _linear_blend(a, b, w)
+                    if w > 0:
+                        alpha = np.linspace(0, 1, w, dtype=np.float32)[np.newaxis, :, np.newaxis]  # (1,w,1)
+
+                        strip_a_end = a[:, -w:, :].astype(np.float32)
+                        strip_b_start = b[:, :w, :].astype(np.float32) * b_correction
+
+                        blended = ((1 - alpha) * strip_a_end + alpha * strip_b_start).astype(np.int16)
+
+                        a[:, -w:, :] = blended
+                        #b[:, :w,  :] = blended
                     
                     with prev_strip: # type: ignore
                         # this is the 2nd time this Product is entered, so it will release after this
@@ -280,25 +287,25 @@ class StripStitcher(Processor[StripProcessor]):
                         # exiting context manager decrements product._remaining
                         # for 1 subscriber, net = 0; product not returned to pool
 
-                    if strip_product.indices[1] == self._n_strips - 1:
+                    if strip.indices[1] == self._n_strips - 1:
                         # on last strip of the z level, publish last strip
-                        with strip_product:     # make sure to release the product
+                        with strip:     # make sure to release the product
                             correction = np.linspace(prev_correction, 1, b.shape[1])
                             b[...] = (b * correction[None,:,None]).astype(np.int16)
 
-                            print(f"Republishing strip {strip_product.indices}")
-                            self._publish(strip_product) 
+                            print(f"Republishing strip {strip.indices}")
+                            self._publish(strip) 
                         prev_correction = 1
+                        prev_strip = None
                     else:
-                        prev_strip = strip_product
+                        prev_strip = strip
 
         except EndOfStream:
-            try:
+            if prev_strip:
                 with prev_strip: # type: ignore
                     print(f"Republishing strip {prev_strip.indices}")
                     self._publish(prev_strip)
-            except UnboundLocalError:
-                pass
+
             self._publish(None)
 
     @property
