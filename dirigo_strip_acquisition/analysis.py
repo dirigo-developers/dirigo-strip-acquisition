@@ -200,7 +200,37 @@ class PhaseLogger(Logger):
         plt.xlabel("Trigger number")
         plt.ylabel("Phase (rad)")
         plt.show()
-        
+
+
+class PositionLogger(Logger):
+    """Log all positions"""
+    def __init__(self, upstream):
+        super().__init__(upstream)
+        self._positions = []
+
+    def _receive_product(self) -> ProcessorProduct:
+        return super()._receive_product() # type: ignore
+
+    def run(self):
+        try:
+            while True:
+                with self._receive_product() as frame:
+                    self._positions.append(frame.positions)
+        except EndOfStream:
+            self._publish(None)
+
+    def save_data(self):
+        all_positions = np.array(self._positions)
+        x, y = all_positions[...,0].ravel(), all_positions[...,1].ravel()
+        x -= x[0]
+        y -= y[0]
+        t = np.arange(len(x))        # use the sample‐index as the colour
+
+        plt.scatter(1000*x, 1000*y, c=t, cmap='plasma', s=5)   # s=dot‐size
+        plt.xlabel("X location (mm)")
+        plt.ylabel("Y location (mm)")
+        plt.colorbar(label='sample index')
+        plt.show()
 
 
 if __name__ == "__main__":
@@ -209,6 +239,7 @@ if __name__ == "__main__":
 
     loader = StripAcquisitionLoader(fn)
     # timestamper = LineTimestampLogger(upstream=loader)
+    positioner = PositionLogger(upstream=loader)
     processor = RasterFrameProcessor(upstream=loader)
     # phaser = PhaseLogger(upstream=processor)
     strip_processor = StripProcessor(upstream=processor)
@@ -219,6 +250,7 @@ if __name__ == "__main__":
     logger = PyramidLogger(upstream=tile_builder)
 
     # loader.add_subscriber(timestamper)
+    loader.add_subscriber(positioner)
     loader.add_subscriber(processor)
     # processor.add_subscriber(phaser)
     processor.add_subscriber(strip_processor)
@@ -229,6 +261,7 @@ if __name__ == "__main__":
     tile_builder.add_subscriber(logger)
 
     # timestamper.start()
+    positioner.start()
     processor.start()
     # phaser.start()
     strip_processor.start()
@@ -241,4 +274,4 @@ if __name__ == "__main__":
 
     logger.join(30)
 
-    # phaser.save_data()
+    positioner.save_data()

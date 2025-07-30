@@ -348,7 +348,6 @@ class StitchedAcquisition(Acquisition, ABC):
                         self._scan_axis_stage.move_to(
                             self.positioner.scan_center(strip_index=strip_index + 1)
                         )
-                        #print("MOVING TO", float(self.positioner.scan_center(strip_index=strip_index + 1)))
                     else:
                         time.sleep(0.050) # Wait to be sure the stage is actually moving
 
