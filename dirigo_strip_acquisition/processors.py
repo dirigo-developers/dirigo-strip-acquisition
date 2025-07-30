@@ -358,6 +358,7 @@ class TileBuilder(Processor[StripStitcher]):
 
         self._init_product_pool(n=4, shape=(*self._tile_shape, self._n_channels), dtype=np.int16)
 
+        self._n_strips = self._acquisition.positioner.n_strips
         self._tiles_web  = math.ceil(self._acquisition.final_shape[-2] / tile_shape[0]) # tiles along the web dimension (strip long axis)
         self._tiles_scan = math.ceil(self._acquisition.final_shape[-3] / tile_shape[0]) # tiles along the scan dimension (strip short axis)
         self._tiles_image = self._tiles_web * self._tiles_scan
@@ -368,8 +369,10 @@ class TileBuilder(Processor[StripStitcher]):
         return super()._receive_product() # type: ignore
         
     def run(self):
-        tile_idx = 0
-        t_z = 0                                             # tile coordinate z dim
+        tiles_scan = self._tiles_scan
+        tiles_web  = self._tiles_web
+        tile_idx = 0   # tile XY coordinate
+        t_z = 0        # tile Z coordinate
 
         tile_shape = self._tile_shape
         effective_pixels_per_line = int(
@@ -377,76 +380,73 @@ class TileBuilder(Processor[StripStitcher]):
         )
 
         try:
-            while True:
+            while True: # Looping in strips
                 with self._receive_product() as strip:
+                    
                     if strip.indices is None:
                         raise RuntimeError("Strip must include indices")
 
-                    while True:
-                        t_w = tile_idx %  self._tiles_web   # tile coordinate web dim
-                        t_s = tile_idx // self._tiles_web   # tile coordinate scan dim
+                    while True: # Looping in tiles scan, tiles web
+                        t_s = tile_idx // tiles_web   # tile coordinate scan dim (parallel to acquired line)
+                        t_w = tile_idx %  tiles_web   # tile coordinate web dim
 
-                        if t_s >= self._tiles_scan: 
-                            # reset leftovers and break to move on to next z
+                        if t_s >= tiles_scan:
+                            # If t_s exceeds expected number tiles in scan dim, reset and break
                             self._leftovers = None
                             tile_idx = 0
                             t_z += 1
                             break
                         
-                        w = t_w * tile_shape[0]   # web dim global pixel coordinate
-                        s = t_s * tile_shape[1]   # scan dim global pixel coordinate
+                        p_s = t_s * tile_shape[0]   # scan dim global pixel coordinate
+                        p_w = t_w * tile_shape[1]   # web dim global pixel coordinate
                         scan_offset = strip.indices[1] * effective_pixels_per_line 
 
-                        s_o = s - scan_offset   # scan pixel coordinate relative to the current strip
+                        p_so = p_s - scan_offset   # scan pixel coordinate relative to the current strip
                         
-                        if (s_o + tile_shape[1]) > strip.data.shape[1]:
-                            # If the start of next tile will exceed current strip 
-                            # dimensions, store leftovers and break to move on to 
-                            # next strip
-                            self._leftovers = strip.data[:, s_o:, :].copy()
-                            break
+                        # If start of next tile will exceed current strip, store leftovers
+                        if (p_so + tile_shape[0]) > strip.data.shape[1]:
+                            self._leftovers = strip.data[:, p_so:, :].copy()
+                            # and not last strip of z level:
+                            if strip.indices[1] < (self._n_strips-1):
+                                break # go on to recieve a new strip to complete the tile
 
                         tile = self.get_free_product()
                         tile.coords = (t_z, t_s, t_w)
                         tile.data[...] = 0      # clear old tile data                   
 
-                        if s_o >= 0:
-                            # tile fully within current strip, copy into tile object
+                        if p_so >= 0:    # Situation 1: tile in current strip, copy into tile object
                             data = strip.data[
-                                w : min(w + self._tile_shape[0], strip.data.shape[0]),
-                                s_o : min(s_o + self._tile_shape[1], strip.data.shape[1]),
+                                p_w : min(p_w + self._tile_shape[1], strip.data.shape[0]),
+                                p_so : min(p_so + self._tile_shape[0], strip.data.shape[1]),
                                 :
                             ]
                             tile.data[:data.shape[0], :data.shape[1], :] = data
-                        else:   # tile stradles previous strip and the current strip
+                        else:           # Situation 2: tile stradles previous and current strips
                             # copy data from leftovers
                             if self._leftovers is None:
                                 raise RuntimeError("Leftovers not initialized")
                             data1 = self._leftovers[
-                                w : min(w + self._tile_shape[0], self._leftovers.shape[0]),
+                                p_w : min(p_w + self._tile_shape[0], self._leftovers.shape[0]),
                                 :, :
                             ]
                             tile.data[:data1.shape[0], :data1.shape[1], :] = data1
 
                             # copy data from current strip
                             data2 = strip.data[
-                                w : min(w + self._tile_shape[0], self._leftovers.shape[0]),
-                                :(self._tile_shape[1] + s_o),
+                                p_w : min(p_w + self._tile_shape[0], self._leftovers.shape[0]),
+                                :(self._tile_shape[1] + p_so),
                                 :
                             ]
                             tile.data[:data2.shape[0], -data2.shape[1]:, :] = data2
                         
-                        _transpose_inplace(tile.data) # TODO, is this right?
+                        _transpose_inplace(tile.data) # go from strips in dimensions (web, scan, chan) to tiles in (scan, web, chan)
 
-                        # print(f"Publishing tile {t_z,t_s,t_w}, shape: {tile.data.shape}")
+                        print(f"Publishing tile {t_z,t_s,t_w}")
                         self._publish(tile)
                         tile_idx += 1
 
         except EndOfStream:
             self._publish(None)
-
-        # finally:
-        #     self._publish(None)
 
     def get_free_product(self, timeout: units.Time | None = None) -> TileProduct:
         return self._product_pool.get(timeout=timeout)
