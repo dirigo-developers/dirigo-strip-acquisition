@@ -436,8 +436,7 @@ class TileBuilder(Processor[StripStitcher]):
                             ]
                             tile.data[:data2.shape[0], -data2.shape[1]:, :] = data2
                         
-                        if self._acquisition.system_config.fast_raster_scanner['axis'] == "x":
-                            _transpose_inplace(tile.data)
+                        _transpose_inplace(tile.data) # TODO, is this right?
 
                         # print(f"Publishing tile {t_z,t_s,t_w}, shape: {tile.data.shape}")
                         self._publish(tile)
@@ -513,10 +512,10 @@ class StitchedPreview(Processor):
         self._z_levels = self._acquisition.final_shape[0]
         preview_shape = (self._tiles_scan * self._downsampled_tile_length, 
                          self._tiles_web  * self._downsampled_tile_length,
-                         self._acquisition.final_shape[3])
+                         self._acquisition.final_shape[3]) # the preview does not have a Z dimension
 
         self._init_product_pool(
-            n       = 1, 
+            n       = 1,
             shape   = preview_shape, 
             dtype   = self.data_range.recommended_dtype,
         )
