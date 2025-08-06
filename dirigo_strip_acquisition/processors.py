@@ -240,22 +240,14 @@ class StripStitcher(Processor[StripProcessor]):
 
                     a, b = prev_strip.data, strip.data
 
-                    # # TEST
-                    # prof = np.median(a, axis=(0,2))
-                    # x = np.arange(-len(prof)//2, len(prof)//2)
-                    # coeffs = np.polyfit(x, prof, 2)
-                    # print(coeffs[0] / coeffs[2])
-
                     # Field flattening
                     a_end   = np.average(a[:, -w:-1, :], axis=(1,2))
                     b_start = np.average(b[:, 1:w, :], axis=(1,2))
 
-                    # center  = np.average(a[:, 495:505, :], axis=(1,2))
-                    # print( np.median(center[a_end>100] / a_end[a_end>100]) )
                     seam_avg = (a_end + b_start) / 2
 
                     a_correction = seam_avg / a_end
-                    a_correction = a_correction[~np.isnan(a_correction) & (a_end > 60)]
+                    a_correction = a_correction[~np.isnan(a_correction) & (a_end > 60)] # TODO: set cutoff programatically
                     a_correction = np.median(a_correction)
 
                     b_correction = seam_avg / b_start
@@ -270,14 +262,14 @@ class StripStitcher(Processor[StripProcessor]):
                     # Blend the edges
                     if w > 0:
                         alpha = np.linspace(0, 1, w, dtype=np.float32)[np.newaxis, :, np.newaxis]  # (1,w,1)
+                        alpha = np.clip(2 * alpha, a_min=0, a_max=1) # blend only the inner part of overlap area
 
-                        strip_a_end = a[:, -w:, :].astype(np.float32)
-                        strip_b_start = b[:, :w, :].astype(np.float32) * b_correction
+                        strip_a_end     = a[:, -w:, :].astype(np.float32)
+                        strip_b_start   = b[:, :w,  :].astype(np.float32) * b_correction
 
-                        blended = ((1 - alpha) * strip_a_end + alpha * strip_b_start).astype(np.int16)
+                        blended = ((1-alpha)*strip_a_end + alpha*strip_b_start).astype(np.int16)
 
-                        a[:, -w:, :] = blended
-                        #b[:, :w,  :] = blended
+                        a[:, -w:, :] = blended  # only correct A since B (edge) will not be used for tiles
                     
                     with prev_strip: # type: ignore
                         # this is the 2nd time this Product is entered, so it will release after this
@@ -288,7 +280,7 @@ class StripStitcher(Processor[StripProcessor]):
                         # for 1 subscriber, net = 0; product not returned to pool
 
                     if strip.indices[1] == self._n_strips - 1:
-                        # on last strip of the z level, publish last strip
+                        # on last strip of the z opt. section, publish last strip
                         with strip:     # make sure to release the product
                             correction = np.linspace(prev_correction, 1, b.shape[1])
                             b[...] = (b * correction[None,:,None]).astype(np.int16)
