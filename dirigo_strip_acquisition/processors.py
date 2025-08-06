@@ -435,7 +435,7 @@ class TileBuilder(Processor[StripStitcher]):
                         
                         _transpose_inplace(tile.data) # go from strips in dimensions (web, scan, chan) to tiles in (scan, web, chan)
 
-                        print(f"Publishing tile {t_z,t_s,t_w}")
+                        #print(f"Publishing tile {t_z,t_s,t_w}")
                         self._publish(tile)
                         tile_idx += 1
 

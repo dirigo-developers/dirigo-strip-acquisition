@@ -244,8 +244,8 @@ if __name__ == "__main__":
     # phaser = PhaseLogger(upstream=processor)
     strip_processor = StripProcessor(upstream=processor)
     strip_stitcher = StripStitcher(upstream=strip_processor)
-    strip_logger = TiffLogger(upstream=strip_stitcher)
-    strip_logger.frames_per_file = 100
+    # strip_logger = TiffLogger(upstream=strip_stitcher)
+    # strip_logger.frames_per_file = 100
     tile_builder = TileBuilder(upstream=strip_stitcher)
     logger = PyramidLogger(upstream=tile_builder)
 
@@ -257,7 +257,7 @@ if __name__ == "__main__":
     #strip_processor.add_subscriber(strip_logger)
     strip_processor.add_subscriber(strip_stitcher)
     strip_stitcher.add_subscriber(tile_builder)
-    strip_stitcher.add_subscriber(strip_logger)
+    # strip_stitcher.add_subscriber(strip_logger)
     tile_builder.add_subscriber(logger)
 
     timestamper.start()
@@ -265,7 +265,7 @@ if __name__ == "__main__":
     processor.start()
     # phaser.start()
     strip_processor.start()
-    strip_logger.start()
+    # strip_logger.start()
     strip_stitcher.start()
     tile_builder.start()
     logger.start()
@@ -274,4 +274,4 @@ if __name__ == "__main__":
 
     logger.join(30)
 
-    timestamper.save_data()
+    # timestamper.save_data()
