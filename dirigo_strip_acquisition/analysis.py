@@ -235,22 +235,22 @@ class PositionLogger(Logger):
 
 if __name__ == "__main__":
     # Use to reprocess raw saved datasets
-    fn = r"D:\dirigo-data\2019-P-000791\1\1_scan_raw_0.tif"
+    fn = r"C:\dirigo-data\2019-P-000791\1\1_scan_raw_0.tif"
 
     loader = StripAcquisitionLoader(fn)
-    # timestamper = LineTimestampLogger(upstream=loader)
-    positioner = PositionLogger(upstream=loader)
+    timestamper = LineTimestampLogger(upstream=loader)
+    #positioner = PositionLogger(upstream=loader)
     processor = RasterFrameProcessor(upstream=loader)
     # phaser = PhaseLogger(upstream=processor)
     strip_processor = StripProcessor(upstream=processor)
-    strip_logger = TiffLogger(upstream=strip_processor)
-    strip_logger.frames_per_file = 100
     strip_stitcher = StripStitcher(upstream=strip_processor)
+    strip_logger = TiffLogger(upstream=strip_stitcher)
+    strip_logger.frames_per_file = 100
     tile_builder = TileBuilder(upstream=strip_stitcher)
     logger = PyramidLogger(upstream=tile_builder)
 
-    # loader.add_subscriber(timestamper)
-    loader.add_subscriber(positioner)
+    loader.add_subscriber(timestamper)
+    #loader.add_subscriber(positioner)
     loader.add_subscriber(processor)
     # processor.add_subscriber(phaser)
     processor.add_subscriber(strip_processor)
@@ -260,8 +260,8 @@ if __name__ == "__main__":
     strip_stitcher.add_subscriber(strip_logger)
     tile_builder.add_subscriber(logger)
 
-    # timestamper.start()
-    positioner.start()
+    timestamper.start()
+    #positioner.start()
     processor.start()
     # phaser.start()
     strip_processor.start()
@@ -274,4 +274,4 @@ if __name__ == "__main__":
 
     logger.join(30)
 
-    positioner.save_data()
+    timestamper.save_data()

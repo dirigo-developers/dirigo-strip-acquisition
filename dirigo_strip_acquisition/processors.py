@@ -229,7 +229,7 @@ class StripStitcher(Processor[StripProcessor]):
         try:
             while True:
                 with self._receive_product() as strip:
-                    if strip.indices is None:
+                    if strip.indices is None: # (z, strip)
                         raise RuntimeError("Strip products must include indices.")
                     strip.hold_once() # product won't be released until it is opened again
 
@@ -252,7 +252,7 @@ class StripStitcher(Processor[StripProcessor]):
 
                     b_correction = seam_avg / b_start
                     b_correction = b_correction[~np.isnan(b_correction) & (b_start > 60)]
-                    b_correction = np.median(b_correction[~np.isnan(b_correction)])
+                    b_correction = np.median(b_correction)
 
                     correction = np.linspace(prev_correction, a_correction, a.shape[1])
                     a[...] = (a * correction[None,:,None]).astype(np.int16)
@@ -262,7 +262,7 @@ class StripStitcher(Processor[StripProcessor]):
                     # Blend the edges
                     if w > 0:
                         alpha = np.linspace(0, 1, w, dtype=np.float32)[np.newaxis, :, np.newaxis]  # (1,w,1)
-                        alpha = np.clip(2 * alpha, a_min=0, a_max=1) # blend only the inner part of overlap area
+                        alpha = np.clip(2*(alpha-0.5) + 0.5, a_min=0, a_max=1) # blend only the inner part of overlap area
 
                         strip_a_end     = a[:, -w:, :].astype(np.float32)
                         strip_b_start   = b[:, :w,  :].astype(np.float32) * b_correction
@@ -370,6 +370,7 @@ class TileBuilder(Processor[StripStitcher]):
         effective_pixels_per_line = int(
             self._spec.pixels_per_line * (1-self._spec.strip_overlap)
         )
+        overlap_pixels = self._spec.pixels_per_line - effective_pixels_per_line
 
         try:
             while True: # Looping in strips
@@ -389,13 +390,14 @@ class TileBuilder(Processor[StripStitcher]):
                             t_z += 1
                             break
                         
-                        p_s = t_s * tile_shape[0]   # scan dim global pixel coordinate
-                        p_w = t_w * tile_shape[1]   # web dim global pixel coordinate
-                        scan_offset = strip.indices[1] * effective_pixels_per_line 
+                        p_s = t_s * tile_shape[0]   # scan dim global pixel tile start
+                        p_w = t_w * tile_shape[1]   # web dim global pixel tile start
+                        scan_offset = strip.indices[1] * effective_pixels_per_line # scan dim global pixel strip start
 
                         p_so = p_s - scan_offset   # scan pixel coordinate relative to the current strip
-                        
-                        # If start of next tile will exceed current strip, store leftovers
+                        # p_so < 0 means that the tile "starts" in the previous strip
+
+                        # If start of next tile will exceed current strip, then we need another strip to complete it; store leftovers
                         if (p_so + tile_shape[0]) > strip.data.shape[1]:
                             self._leftovers = strip.data[:, p_so:, :].copy()
                             # and not last strip of z level:
@@ -426,7 +428,7 @@ class TileBuilder(Processor[StripStitcher]):
                             # copy data from current strip
                             data2 = strip.data[
                                 p_w : min(p_w + self._tile_shape[0], self._leftovers.shape[0]),
-                                :(self._tile_shape[1] + p_so),
+                                overlap_pixels:(self._tile_shape[1] + p_so),
                                 :
                             ]
                             tile.data[:data2.shape[0], -data2.shape[1]:, :] = data2
