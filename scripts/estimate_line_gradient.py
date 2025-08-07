@@ -11,11 +11,12 @@ from dirigo_strip_acquisition.analysis import StripAcquisitionLoader, SignalGrad
 
 
 if __name__ == "__main__":
-    fn = r"F:\dirigo test data\gyn3_scan_raw_0.tif"
+    fn = r"D:\dirigo test data\gyn3_scan_raw_0.tif"
 
     loader          = StripAcquisitionLoader(fn)
     processor       = RasterFrameProcessor(upstream=loader)
     gradient_logger = SignalGradientLogger(upstream=processor)
+    gradient_logger.show_results = True
 
     loader.add_subscriber(processor)
     processor.add_subscriber(gradient_logger)

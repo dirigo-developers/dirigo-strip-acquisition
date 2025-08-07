@@ -126,8 +126,8 @@ class SignalGradientLogger(Logger):
     def __init__(self, upstream):
         super().__init__(upstream)
         self._strip_sum = None
-
         self.filepath = config_path() / "optics" / ("line_gradient.csv")
+        self.show_results = False
 
     def _receive_product(self) -> ProcessorProduct:
         return super()._receive_product() # type: ignore
@@ -148,7 +148,7 @@ class SignalGradientLogger(Logger):
         finally:
             self._publish(None)
 
-    def save_data(self, strip_sum: np.ndarray, show_results = False):
+    def save_data(self, strip_sum: np.ndarray):
         # average traces
         spec = self._acquisition.spec
         w = spec.line_width
@@ -165,7 +165,7 @@ class SignalGradientLogger(Logger):
         )
 
         # Plot results (optional)
-        if show_results:
+        if self.show_results:
             fig, ax1 = plt.subplots(figsize=(8, 5))
             y_label = "Intensity (au)"
             x_label = "Position (um)"
@@ -282,7 +282,7 @@ class PositionLogger(Logger):
 
 if __name__ == "__main__":
     # Use to reprocess raw saved datasets
-    fn = r"F:\dirigo test data\gyn3_scan_raw_0.tif"
+    fn = r"D:\dirigo test data\gyn3_scan_raw_0.tif"
 
     loader = StripAcquisitionLoader(fn)
     timestamper = LineTimestampLogger(upstream=loader)

@@ -47,6 +47,8 @@ class PyramidLogger(Logger):
             'PhysicalSizeXUnit': 'm',
             'PhysicalSizeY': float(self._acquisition.spec.pixel_size),
             'PhysicalSizeYUnit': 'm',
+            'PhysicalSizeZ': float(self._acquisition.spec.z_step),
+            'PhysicalSizeZUnit': 'm',
             'Channel': {'Name': ['Channel 1', 'Channel 2']}, # TODO, rename these out of system config
         }
         
