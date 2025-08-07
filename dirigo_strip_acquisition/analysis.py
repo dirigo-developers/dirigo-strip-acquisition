@@ -3,12 +3,13 @@ import json
 
 import numpy as np
 from numpy.polynomial.polynomial import Polynomial
-from platformdirs import user_config_path
+from numba import njit, prange
 import tifffile
 import matplotlib.pyplot as plt
 from scipy.ndimage import uniform_filter1d
+from scipy.signal import savgol_filter 
 
-from dirigo.components.io import SystemConfig
+from dirigo.components.io import SystemConfig, config_path
 from dirigo.sw_interfaces.worker import EndOfStream
 from dirigo.sw_interfaces.logger import Logger
 from dirigo.sw_interfaces.acquisition import AcquisitionProduct, Loader
@@ -111,43 +112,89 @@ class StripAcquisitionLoader(Loader):
         return self._product_pool.get()
     
 
+@njit(fastmath=True, cache=True)
+def _sum_high_signal_lines(frame, thresh):
+    ny, nx, nc = frame.shape
+    out = np.zeros((nx, nc), dtype=np.int64)
+    for i in range(ny):
+        if np.all(frame[i] > thresh):
+            out += frame[i] 
+    return out
+
+
 class SignalGradientLogger(Logger):
     def __init__(self, upstream):
         super().__init__(upstream)
         self._strip_sum = None
 
+        self.filepath = config_path() / "optics" / ("line_gradient.csv")
+
+    def _receive_product(self) -> ProcessorProduct:
+        return super()._receive_product() # type: ignore
+
     def run(self):
         try:
             while True:
-                strip: ProcessorProduct = self.inbox.get()
-                if strip is None:
-                    break
+                with self._receive_product() as frame:
 
-                with strip:
                     if self._strip_sum is not None:
-                        self._strip_sum += np.sum(strip.data[...,0], axis=0)
+                        self._strip_sum += _sum_high_signal_lines(frame.data, 100)
                     else:
-                        self._strip_sum = np.sum(strip.data[...,0], axis=0)
+                        self._strip_sum = _sum_high_signal_lines(frame.data, 100)
+
+        except:
+            self.save_data(self._strip_sum)
 
         finally:
-            self.save_data(self._strip_sum)
             self._publish(None)
 
-    def save_data(self, strip_sum: np.ndarray):
-        # Fit data to polynomial
-        x = np.arange(len(strip_sum))
-        gradient_fit = Polynomial.fit(
-            x=x,
-            y=1 / strip_sum,
-            deg=2
+    def save_data(self, strip_sum: np.ndarray, show_results = False):
+        # average traces
+        spec = self._acquisition.spec
+        w = spec.line_width
+        n_x = round(w / spec.pixel_size)
+        x = np.linspace(-w/2, w/2, n_x)
+        strip_sum = strip_sum.astype(np.float64)
+
+        # smooth traces
+        smoothed = savgol_filter(
+            x               = strip_sum, 
+            window_length   = 101, 
+            polyorder       = 3,
+            axis            = 0
         )
-        
-        gradient: np.ndarray = gradient_fit(x)
-        gradient /= gradient.max()
-        
-        fn = user_config_path("Dirigo") / f"optics/gradient_calibration.tif"
-        with tifffile.TiffWriter(fn) as tif:
-            tif.write(gradient.astype(np.float32))
+
+        # Plot results (optional)
+        if show_results:
+            fig, ax1 = plt.subplots(figsize=(8, 5))
+            y_label = "Intensity (au)"
+            x_label = "Position (um)"
+
+            ax1.scatter(x*1e6, strip_sum[:,0], color="tab:blue", label=y_label)
+            ax1.plot(x*1e6, smoothed[:,0], color="tab:blue", label=y_label)
+            ax1.set_xlabel(x_label)
+            ax1.set_ylabel(y_label, color="tab:blue")
+            ax1.tick_params(axis="y", labelcolor="tab:blue")
+
+            ax2 = ax1.twinx()
+            ax2.scatter(x*1e6, strip_sum[:,1], color="tab:red", label=y_label)
+            ax2.plot(x*1e6, smoothed[:,1], color="tab:red", label=y_label)
+            ax2.set_ylabel(y_label, color="tab:red")
+            ax2.tick_params(axis="y", labelcolor="tab:red")
+            
+            ax1.grid(True, which="both", ls="--", alpha=0.4)
+            fig.tight_layout()
+            plt.show()
+
+        # Normalize & record traces
+        smoothed = smoothed / np.max(smoothed, axis=0, keepdims=True)
+        np.savetxt(
+            fname       = self.filepath, 
+            X           = np.concat([x[:,None],smoothed], axis=1), 
+            delimiter   = ',',
+            header      = "x (m),channel 1, channel 2"
+        )
+
 
 
 class LineTimestampLogger(Logger):
@@ -235,7 +282,7 @@ class PositionLogger(Logger):
 
 if __name__ == "__main__":
     # Use to reprocess raw saved datasets
-    fn = r"C:\dirigo-data\2019-P-000791\1\1_scan_raw_0.tif"
+    fn = r"F:\dirigo test data\gyn3_scan_raw_0.tif"
 
     loader = StripAcquisitionLoader(fn)
     timestamper = LineTimestampLogger(upstream=loader)

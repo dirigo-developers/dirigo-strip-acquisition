@@ -313,7 +313,7 @@ class StripStitcher(Processor[StripProcessor]):
         return self._data_range
 
 
-@njit(parallel=True)
+@njit(parallel=True, fastmath=True, nogil=True, cache=True)
 def _transpose_inplace(a: np.ndarray):
     """
     In-place transpose of the spatial dims of a (n, n, c) array.
