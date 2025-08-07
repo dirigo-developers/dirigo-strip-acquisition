@@ -210,6 +210,8 @@ class StripStitcher(Processor[StripProcessor]):
     
     Note that this works in-place on the strip data (not copied).
     """
+    INTENSITY_THRESH = 200
+
     def __init__(self, upstream: StripProcessor):
         super().__init__(upstream)
         self._data_range = upstream.data_range
@@ -241,21 +243,27 @@ class StripStitcher(Processor[StripProcessor]):
                     a, b = prev_strip.data, strip.data
 
                     # Field flattening
-                    a_end   = np.average(a[:, -w:-1, :], axis=(1,2))
-                    b_start = np.average(b[:, 1:w, :], axis=(1,2))
+                    a_end   = np.average(a[:, -w:-1, :], axis=1, keepdims=True) # skip the very last pixel b/c can be 0
+                    a_end[a_end == 0] = 1e-9
+                    b_start = np.average(b[:, 1:w, :], axis=1, keepdims=True)
+                    b_start[b_start == 0] = 1e-9
 
                     seam_avg = (a_end + b_start) / 2
 
-                    a_correction = seam_avg / a_end
-                    a_correction = a_correction[~np.isnan(a_correction) & (a_end > 60)] # TODO: set cutoff programatically
-                    a_correction = np.median(a_correction)
+                    ac = seam_avg / a_end
+                    a_correction = [
+                        np.median(ac[...,c][a_end[...,c] > self.INTENSITY_THRESH], axis=0)
+                            for c in range(a.shape[-1])
+                    ]
 
-                    b_correction = seam_avg / b_start
-                    b_correction = b_correction[~np.isnan(b_correction) & (b_start > 60)]
-                    b_correction = np.median(b_correction)
+                    bc = seam_avg / b_start
+                    b_correction = [
+                        np.median(bc[...,c][b_start[...,c] > self.INTENSITY_THRESH], axis=0)
+                            for c in range(a.shape[-1])
+                    ]
 
                     correction = np.linspace(prev_correction, a_correction, a.shape[1])
-                    a[...] = (a * correction[None,:,None]).astype(np.int16)
+                    a[...] = (a * correction[None,:,:]).astype(np.int16)
 
                     prev_correction = b_correction
 
@@ -283,7 +291,7 @@ class StripStitcher(Processor[StripProcessor]):
                         # on last strip of the z opt. section, publish last strip
                         with strip:     # make sure to release the product
                             correction = np.linspace(prev_correction, 1, b.shape[1])
-                            b[...] = (b * correction[None,:,None]).astype(np.int16)
+                            b[...] = (b * correction[None,:,:]).astype(np.int16)
 
                             print(f"Republishing strip {strip.indices}")
                             self._publish(strip) 
@@ -551,10 +559,4 @@ class StitchedPreview(Processor):
     def add_subscriber(self, subscriber: Worker):
         """Adds the subscriber and publishes a blank product."""
         super().add_subscriber(subscriber)
-        self._publish(self._get_free_product())
-        self._hold = False
-
-    @property
-    def data_range(self) -> units.IntRange:
-        return self._data_range
-
+        self._publish(se
