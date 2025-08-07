@@ -559,4 +559,10 @@ class StitchedPreview(Processor):
     def add_subscriber(self, subscriber: Worker):
         """Adds the subscriber and publishes a blank product."""
         super().add_subscriber(subscriber)
-        self._publish(se
+        self._publish(self._get_free_product())
+        self._hold = False
+
+    @property
+    def data_range(self) -> units.IntRange:
+        return self._data_range
+
