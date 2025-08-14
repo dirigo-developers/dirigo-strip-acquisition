@@ -73,7 +73,7 @@ class RasterScanStripAcquisition(LineAcquisition):
         else:
             return self.hw.fast_raster_scanner.frequency
 
-    def run(self):
+    def _work(self):
         """
         Adds to LineAcquisition's run():
         - starts and stops the position encoders
@@ -156,7 +156,7 @@ class LineCameraStripAcquisition(LineCameraLineAcquisition):
     # property: axis defined in super class
     # property: line_rate defined in super class
 
-    def run(self):
+    def _work(self):
         """
         Adds to LineCameraLineAcquisition's run():
         - starts and stop illuminator
@@ -292,7 +292,7 @@ class StitchedAcquisition(Acquisition, ABC):
         """
         self._strip_acquisition.add_subscriber(subscriber)
 
-    def run(self):
+    def _work(self):
         original_position = (
             self.hw.stages.x.position, 
             self.hw.stages.y.position,

@@ -76,7 +76,7 @@ class StripAcquisitionLoader(Loader):
             n_channels
         )
 
-    def run(self):
+    def _work(self):
         try:
             with tifffile.TiffFile(self._file_path) as tif:   
                 frames_read = 0
@@ -132,7 +132,7 @@ class SignalGradientLogger(Logger):
     def _receive_product(self) -> ProcessorProduct:
         return super()._receive_product() # type: ignore
 
-    def run(self):
+    def _work(self):
         try:
             while True:
                 with self._receive_product() as frame:
@@ -206,7 +206,7 @@ class LineTimestampLogger(Logger):
     def _receive_product(self) -> AcquisitionProduct:
         return super()._receive_product() # type: ignore
 
-    def run(self):
+    def _work(self):
         try:
             while True:
                 with self._receive_product() as frame:
@@ -233,7 +233,7 @@ class PhaseLogger(Logger):
     def _receive_product(self) -> ProcessorProduct:
         return super()._receive_product() # type: ignore
 
-    def run(self):
+    def _work(self):
         try:
             while True:
                 with self._receive_product() as frame:
@@ -258,7 +258,7 @@ class PositionLogger(Logger):
     def _receive_product(self) -> ProcessorProduct:
         return super()._receive_product() # type: ignore
 
-    def run(self):
+    def _work(self):
         try:
             while True:
                 with self._receive_product() as frame:

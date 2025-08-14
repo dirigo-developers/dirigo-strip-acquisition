@@ -120,7 +120,7 @@ class PyramidLogger(Logger):
         except GeneratorExit:
             pass
 
-    def run(self):
+    def _work(self):
         try:
             self.save_data()
         
