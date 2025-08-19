@@ -90,7 +90,7 @@ class RasterScanStripAcquisition(LineAcquisition):
             if self.hw.exists('slow_raster_scanner'):
                 self.hw.slow_raster_scanner.center()
 
-            super().run()
+            super()._work()
 
         finally:
             if self.hw.exists('slow_raster_scanner'):
@@ -167,7 +167,7 @@ class LineCameraStripAcquisition(LineCameraLineAcquisition):
         self.hw.illuminator.turn_on() 
         
         try:
-            super().run()
+            super()._work()
 
         finally:
             self.hw.illuminator.turn_off() 
