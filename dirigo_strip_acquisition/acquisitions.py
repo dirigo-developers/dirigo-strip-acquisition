@@ -7,6 +7,7 @@ import math, time
 import numpy as np
 
 from dirigo import units, io
+from dirigo.components.hardware import NotConfiguredError
 from dirigo.sw_interfaces.acquisition import Acquisition, AcquisitionProduct, AcquisitionSpec
 from dirigo.plugins.acquisitions import (
     LineAcquisitionSpec, LineAcquisition, 
@@ -87,14 +88,18 @@ class RasterScanStripAcquisition(LineAcquisition):
 
         try:
             # If slow raster scanner present, center 
-            if self.hw.exists('slow_raster_scanner'):
+            try:
                 self.hw.slow_raster_scanner.center()
+            except NotConfiguredError:
+                pass
 
             super()._work()
 
         finally:
-            if self.hw.exists('slow_raster_scanner'):
+            try:
                 self.hw.slow_raster_scanner.park()
+            except NotConfiguredError:
+                pass
 
             self.hw.encoders.stop()
 

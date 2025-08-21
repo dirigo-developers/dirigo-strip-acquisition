@@ -1,7 +1,7 @@
 import math, time
 from typing import Optional
 
-from numba import njit, prange, int16, uint8, uint16, float32, float64, int64, boolean
+from numba import njit, prange, int16, uint8, uint16, float32, float64, int64, boolean, types
 import numpy as np
 from numpy.polynomial.polynomial import Polynomial
 
@@ -22,10 +22,11 @@ Expected limitations:
 - won't work when tiff tile size >= strip width
 """
 
+int16_3d_readonly  = types.Array(types.int16, 3, 'C', readonly=True)
+
 sig = [
-#         strip         lines         positions     pixel_size  prev_row  flip_line
-    int64(int16[:,:,:],  int16[:,:,:],  float64[:,:], float64,    int64,    boolean),
-    #int64(uint16[:,:,:], uint16[:,:,:], float64[:,:], float64,    int64,    boolean)
+#         strip         lines               positions     pixel_size  prev_row  flip_line
+    int64(int16[:,:,:], int16_3d_readonly,  float64[:,:], float64,    int64,    boolean),
 ]
 @njit(sig, parallel=True, fastmath=True, cache=True)
 def _line_placement_kernel(strip: np.ndarray,     # dim order (web, scan, chan)
