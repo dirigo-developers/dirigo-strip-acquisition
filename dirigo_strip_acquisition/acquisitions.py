@@ -73,9 +73,9 @@ class RasterScanStripAcquisition(LineAcquisition):
         else:
             return self.hw.fast_raster_scanner.frequency
 
-    def run(self):
+    def _work(self):
         """
-        Adds to LineAcquisition's run():
+        Adds to LineAcquisition's _work():
         - starts and stops the position encoders
         - centers and parks the slow axis scanner (if present)
         """
@@ -90,7 +90,7 @@ class RasterScanStripAcquisition(LineAcquisition):
             if self.hw.exists('slow_raster_scanner'):
                 self.hw.slow_raster_scanner.center()
 
-            super().run()
+            super()._work()
 
         finally:
             if self.hw.exists('slow_raster_scanner'):
@@ -131,7 +131,7 @@ class LineCameraStripAcquisitionSpec(LineCameraLineAcquisitionSpec):
 
 class LineCameraStripAcquisition(LineCameraLineAcquisition): 
     """
-    Customized LineCameraLineAcquisition that adds functionality to run()
+    Customized LineCameraLineAcquisition that adds functionality to _work()
     """
     required_resources = [FrameGrabber, LineCamera, MultiAxisLinearEncoder, Illuminator]
     Spec = LineCameraStripAcquisitionSpec
@@ -156,9 +156,9 @@ class LineCameraStripAcquisition(LineCameraLineAcquisition):
     # property: axis defined in super class
     # property: line_rate defined in super class
 
-    def run(self):
+    def _work(self):
         """
-        Adds to LineCameraLineAcquisition's run():
+        Adds to LineCameraLineAcquisition's _work():
         - starts and stop illuminator
         - starts and stops the linearizing trigger
         - starts and stops the position encoders
@@ -167,7 +167,7 @@ class LineCameraStripAcquisition(LineCameraLineAcquisition):
         self.hw.illuminator.turn_on() 
         
         try:
-            super().run()
+            super()._work()
 
         finally:
             self.hw.illuminator.turn_off() 
@@ -292,7 +292,7 @@ class StitchedAcquisition(Acquisition, ABC):
         """
         self._strip_acquisition.add_subscriber(subscriber)
 
-    def run(self):
+    def _work(self):
         original_position = (
             self.hw.stages.x.position, 
             self.hw.stages.y.position,
@@ -323,61 +323,7 @@ class StitchedAcquisition(Acquisition, ABC):
             time.sleep(0.001) # wait (active event indicates data is acquiring)
 
         try:
-            for z_index in range(self.spec.z_steps):
-
-                for strip_index in range(self.positioner.n_strips):
-                    if self._stop_event.is_set():
-                        break # Terminate acquisitions
-
-                    self.reset_encoders("forward" if (strip_index % 2) == 0 else "reverse")
-                    print(f"Starting strip {strip_index} of {self.positioner.n_strips}")
-
-                    # start web axis movement
-                    if strip_index % 2:
-                        strip_end_position = self.positioner.web_limits.min - self.spec.pixel_size
-                    else:
-                        strip_end_position = self.positioner.web_limits.max
-
-                    self._web_axis_stage.move_to(strip_end_position)
-
-                    if strip_index < (self.positioner.n_strips - 1):
-                        # wait until web axis decceleration
-                        time.sleep(float(self._web_period) + 0.10) # TODO empirical extra time
-
-                        # begin lateral movement to the next strip
-                        self._scan_axis_stage.move_to(
-                            self.positioner.scan_center(strip_index=strip_index + 1)
-                        )
-                    else:
-                        time.sleep(0.050) # Wait to be sure the stage is actually moving
-
-                    # wait for web axis movement to come to complete stop
-                    self._web_axis_stage.wait_until_move_finished()
-                
-                if z_index < (self.spec.z_steps - 1): # if not on last z level
-                    
-                    # Change web axis velocity (usually faster)
-                    self._web_axis_stage.max_velocity = self._original_web_velocity
-
-                    # Move Z
-                    self.hw.objective_z_scanner.move_to(
-                        self.spec.z_range.min + (z_index+1) * self.spec.z_step
-                    )
-
-                    # Move back to XY starting point
-                    self._scan_axis_stage.move_to(
-                        self.positioner.scan_center(strip_index=0)
-                    )
-                    self._web_axis_stage.move_to(
-                        self.positioner.web_limits.min - self.spec.pixel_size
-                    )
-
-                    time.sleep(0.050) # to make certain the stages have started moving
-                    self._scan_axis_stage.wait_until_move_finished()
-                    self._web_axis_stage.wait_until_move_finished()
-
-                    # Set acquisition web axis velocity
-                    self._web_axis_stage.max_velocity = self._web_velocity
+            self._strip_loop()
 
         finally:
             # Stop the line acquisition Worker
@@ -386,17 +332,71 @@ class StitchedAcquisition(Acquisition, ABC):
             if self.hw.stages.x.moving:
                 self.hw.stages.x.stop()
             if self.hw.stages.y.moving:
-                self.hw.stages.y.stop()
-
-            # Revert the web axis velocity
-            self._web_axis_stage.max_velocity = self._original_web_velocity
+                self.hw.stages.y.stop()           
 
             # Return to original position
             self.hw.stages.x.wait_until_move_finished()
             self.hw.stages.y.wait_until_move_finished()
+            self._web_axis_stage.max_velocity = self._original_web_velocity
             self.hw.stages.x.move_to(original_position[0])
             self.hw.stages.y.move_to(original_position[1])
             self.hw.objective_z_scanner.move_to(original_position[2])
+
+    def _strip_loop(self):
+        for z_index in range(self.spec.z_steps):
+            for strip_index in range(self.positioner.n_strips):
+                if self._stop_event.is_set() or not self._strip_acquisition.is_alive():
+                    return # Terminate loop
+
+                self.reset_encoders("forward" if (strip_index % 2) == 0 else "reverse")
+                print(f"Starting strip {z_index, strip_index}")
+
+                # start web axis movement
+                if strip_index % 2:
+                    strip_end_position = self.positioner.web_limits.min - self.spec.pixel_size
+                else:
+                    strip_end_position = self.positioner.web_limits.max
+
+                self._web_axis_stage.move_to(strip_end_position)
+
+                if strip_index < (self.positioner.n_strips - 1):
+                    # wait until web axis decceleration
+                    time.sleep(float(self._web_period) + 0.10) # TODO empirical extra time
+
+                    # begin lateral movement to the next strip
+                    self._scan_axis_stage.move_to(
+                        self.positioner.scan_center(strip_index=strip_index + 1)
+                    )
+                else:
+                    time.sleep(0.050) # Wait to be sure the stage is actually moving
+
+                # wait for web axis movement to come to complete stop
+                self._web_axis_stage.wait_until_move_finished()
+            
+            if z_index < (self.spec.z_steps - 1): # if not on last z level
+                
+                # Change web axis velocity (usually faster)
+                self._web_axis_stage.max_velocity = self._original_web_velocity
+
+                # Move Z
+                self.hw.objective_z_scanner.move_to(
+                    self.spec.z_range.min + (z_index+1) * self.spec.z_step
+                )
+
+                # Move back to XY starting point
+                self._scan_axis_stage.move_to(
+                    self.positioner.scan_center(strip_index=0)
+                )
+                self._web_axis_stage.move_to(
+                    self.positioner.web_limits.min - self.spec.pixel_size
+                )
+
+                time.sleep(0.050) # to make certain the stages have started moving
+                self._scan_axis_stage.wait_until_move_finished()
+                self._web_axis_stage.wait_until_move_finished()
+
+                # Set acquisition web axis velocity
+                self._web_axis_stage.max_velocity = self._web_velocity
 
     def reset_encoders(self, direction: Literal['forward', 'reverse']):
         """Provide subclass implementation to start a camera trigger"""

@@ -100,7 +100,7 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
     def _receive_product(self) -> ProcessorProduct:
         return super()._receive_product() # type: ignore
     
-    def run(self):
+    def _work(self):
         scan_transl = self._positioner.scan_center(1) - self._positioner.scan_center(0)  
         try:
             strip = self._get_free_product()
@@ -225,7 +225,7 @@ class StripStitcher(Processor[StripProcessor]):
     def _receive_product(self) -> ProcessorProduct:
         return super()._receive_product() # type: ignore
 
-    def run(self):
+    def _work(self):
         w = self._overlap_pixels
         prev_correction = 1
         try:
@@ -368,7 +368,7 @@ class TileBuilder(Processor[StripStitcher]):
     def _receive_product(self) -> ProcessorProduct:
         return super()._receive_product() # type: ignore
         
-    def run(self):
+    def _work(self):
         tiles_scan = self._tiles_scan
         tiles_web  = self._tiles_web
         tile_idx = 0   # tile XY coordinate
@@ -525,7 +525,7 @@ class StitchedPreview(Processor):
     def _receive_product(self) -> TileProduct:
         return super()._receive_product() # type: ignore
     
-    def run(self):
+    def _work(self):
         while self._hold:
             # trick to avoid deadlock: getting stuck at _receive_product()
             time.sleep(0.05)

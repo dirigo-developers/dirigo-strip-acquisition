@@ -30,7 +30,7 @@ class StripTranslationCalibrationLogger(Logger):
     def _receive_product(self) -> ProcessorProduct: 
         return super()._receive_product() # type: ignore
 
-    def run(self):
+    def _work(self):
         # Collects strips
         self._strips =  [] 
         try:
