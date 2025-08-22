@@ -22,6 +22,7 @@ Expected limitations:
 - won't work when tiff tile size >= strip width
 """
 
+uint8_3d_readonly  = types.Array(types.uint8, 3, 'C', readonly=True)
 int16_3d_readonly  = types.Array(types.int16, 3, 'C', readonly=True)
 
 sig = [
@@ -94,7 +95,11 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
             self._acquisition.final_shape[3]
         )
 
-        self._init_product_pool(n=4, shape=self._strip_shape, dtype=np.int16)
+        self._init_product_pool(
+            n =     2, 
+            shape = self._strip_shape, 
+            dtype = np.int16
+        )
         
         self._prev_row = -1 # increments as _line_placement_kernel is called
 
@@ -219,9 +224,15 @@ class StripStitcher(Processor[StripProcessor]):
 
         self._spec: RasterScanStitchedAcquisitionSpec | LineCameraStitchedAcquisitionSpec
         self._n_strips = upstream._positioner.n_strips
-        self._strip_height = upstream.product_shape[0]
-        self._strip_dtype = upstream.product_dtype
+        #self._strip_height = upstream.product_shape[0]
+        #self._strip_dtype = upstream.product_dtype
         self._overlap_pixels = round(self._spec.strip_overlap * self._spec.pixels_per_line)
+
+        self._init_product_pool(
+            n =     2, 
+            shape = upstream._strip_shape, 
+            dtype = np.int16
+        )
 
     def _receive_product(self) -> ProcessorProduct:
         return super()._receive_product() # type: ignore
@@ -230,18 +241,19 @@ class StripStitcher(Processor[StripProcessor]):
         w = self._overlap_pixels
         prev_correction = 1
         try:
+            stitched_strip = self._get_free_product()
             while True:
-                with self._receive_product() as strip:
-                    if strip.indices is None: # (z, strip)
+                with self._receive_product() as in_strip:
+                    if in_strip.indices is None: # (z, strip)
                         raise RuntimeError("Strip products must include indices.")
-                    strip.hold_once() # product won't be released until it is opened again
 
-                    if strip.indices[1] == 0:
+                    if in_strip.indices[1] == 0:
+                        stitched_strip.data[...] = in_strip.data
+                        stitched_strip.indices = in_strip.indices # TODO is this safe?
                         # we need one more strip to start blending
-                        prev_strip = strip
                         continue
 
-                    a, b = prev_strip.data, strip.data
+                    a, b = stitched_strip.data, in_strip.data
 
                     # Field flattening
                     a_end   = np.average(a[:, -w:-1, :], axis=1, keepdims=True) # skip the very last pixel b/c can be 0
@@ -280,32 +292,27 @@ class StripStitcher(Processor[StripProcessor]):
 
                         a[:, -w:, :] = blended  # only correct A since B (edge) will not be used for tiles
                     
-                    with prev_strip: # type: ignore
-                        # this is the 2nd time this Product is entered, so it will release after this
-                        print(f"Republishing strip {prev_strip.indices}")
-                        self._publish(prev_strip)
-                        # publish increments product._remaining
-                        # exiting context manager decrements product._remaining
-                        # for 1 subscriber, net = 0; product not returned to pool
+                    print(f"Publishing stitched strip {stitched_strip.indices}")
+                    self._publish(stitched_strip)
+                    stitched_strip = self._get_free_product()
+                    stitched_strip.indices = in_strip.indices # TODO is this safe?
 
-                    if strip.indices[1] == self._n_strips - 1:
+                    if in_strip.indices[1] == self._n_strips - 1:
                         # on last strip of the z opt. section, publish last strip
-                        with strip:     # make sure to release the product
-                            correction = np.linspace(prev_correction, 1, b.shape[1])
-                            b[...] = (b * correction[None,:,:]).astype(np.int16)
+                        correction = np.linspace(prev_correction, 1, b.shape[1])
+                        stitched_strip.data[...] = (b * correction[None,:,:]).astype(np.int16)
 
-                            print(f"Republishing strip {strip.indices}")
-                            self._publish(strip) 
+                        print(f"Publishing stitched strip {in_strip.indices}")
+                        self._publish(stitched_strip)
+                        stitched_strip = self._get_free_product()
+
                         prev_correction = 1
-                        prev_strip = None
-                    else:
-                        prev_strip = strip
 
         except EndOfStream:
-            if prev_strip:
-                with prev_strip: # type: ignore
-                    print(f"Republishing strip {prev_strip.indices}")
-                    self._publish(prev_strip)
+            # if prev_strip:
+            #     with prev_strip: # type: ignore
+            #         print(f"Republishing strip {prev_strip.indices}")
+            #         self._publish(prev_strip)
 
             self._publish(None)
 
@@ -357,11 +364,19 @@ class TileBuilder(Processor[StripStitcher]):
         self._tile_shape = tile_shape
         self._n_channels = self._acquisition.final_shape[-1] # (z, scan, web, chan)
 
-        self._init_product_pool(n=4, shape=(*self._tile_shape, self._n_channels), dtype=np.int16)
+        self._init_product_pool(
+            n =     10,     # TODO how should this be set?
+            shape = (*self._tile_shape, self._n_channels), 
+            dtype = np.int16
+        )
 
         self._n_strips = self._acquisition.positioner.n_strips
-        self._tiles_web  = math.ceil(self._acquisition.final_shape[-2] / tile_shape[0]) # tiles along the web dimension (strip long axis)
-        self._tiles_scan = math.ceil(self._acquisition.final_shape[-3] / tile_shape[0]) # tiles along the scan dimension (strip short axis)
+        self._tiles_web  = math.ceil(   # tiles along the web dimension (strip long axis)
+            self._acquisition.final_shape[-2] / tile_shape[0]
+        ) 
+        self._tiles_scan = math.ceil(   # tiles along the scan dimension (strip short axis)
+            self._acquisition.final_shape[-3] / tile_shape[0]
+        ) 
         self._tiles_image = self._tiles_web * self._tiles_scan
 
         self._leftovers: Optional[np.ndarray] = None
@@ -413,7 +428,7 @@ class TileBuilder(Processor[StripStitcher]):
                             if strip.indices[1] < (self._n_strips-1):
                                 break # go on to recieve a new strip to complete the tile
 
-                        tile = self.get_free_product()
+                        tile = self._get_free_product()
                         tile.coords = (t_z, t_s, t_w)
                         tile.data[...] = 0      # clear old tile data                   
 
@@ -451,8 +466,8 @@ class TileBuilder(Processor[StripStitcher]):
         except EndOfStream:
             self._publish(None)
 
-    def get_free_product(self, timeout: units.Time | None = None) -> TileProduct:
-        return self._product_pool.get(timeout=timeout)
+    def _get_free_product(self) -> TileProduct:
+        return super()._get_free_product() # type: ignore
 
     @property
     def data_range(self) -> units.IntRange:
@@ -461,9 +476,10 @@ class TileBuilder(Processor[StripStitcher]):
 
 
 sigs = [
-     uint8[:,:,:]( uint8[:,:,:], int64),
-    uint16[:,:,:](uint16[:,:,:], int64),
-     int16[:,:,:]( int16[:,:,:], int64)
+     uint8[:,:,:](uint8[:,:,:],      int64),
+     uint8[:,:,:](uint8_3d_readonly, int64),
+    #uint16[:,:,:](uint16[:,:,:], int64),
+     int16[:,:,:](int16_3d_readonly, int64)
 ]
 @njit(sigs, parallel=True, fastmath=True, cache=True)
 def downsample_kernel(tile: np.ndarray, f: int) -> np.ndarray:
