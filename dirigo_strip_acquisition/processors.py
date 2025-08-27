@@ -249,7 +249,7 @@ class StripStitcher(Processor[StripProcessor]):
 
                     if in_strip.indices[1] == 0:
                         stitched_strip.data[...] = in_strip.data
-                        stitched_strip.indices = in_strip.indices # TODO is this safe?
+                        stitched_strip.indices = tuple(in_strip.indices)
                         # we need one more strip to start blending
                         continue
 
@@ -295,7 +295,8 @@ class StripStitcher(Processor[StripProcessor]):
                     print(f"Publishing stitched strip {stitched_strip.indices}")
                     self._publish(stitched_strip)
                     stitched_strip = self._get_free_product()
-                    stitched_strip.indices = in_strip.indices # TODO is this safe?
+                    stitched_strip.data[...] = in_strip.data
+                    stitched_strip.indices = tuple(in_strip.indices)
 
                     if in_strip.indices[1] == self._n_strips - 1:
                         # on last strip of the z opt. section, publish last strip
