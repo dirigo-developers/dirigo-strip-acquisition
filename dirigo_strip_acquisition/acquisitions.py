@@ -311,11 +311,13 @@ class StitchedAcquisition(Acquisition, ABC):
         self._web_axis_stage.move_to(
             self.positioner.web_limits.min - self.spec.pixel_size # a bit extra movement to be sure we trigger enough samples
         )
-        #print(f"Are stages moving. Scan {self._scan_axis_stage.moving}")
-        #print(f"Are stages moving. Web {self._web_axis_stage.moving}")
         time.sleep(0.050) # to make certain the stages have started moving
         self._scan_axis_stage.wait_until_move_finished()
         self._web_axis_stage.wait_until_move_finished()
+
+        # Set objective Z scanner velo/accel
+        self.hw.objective_z_scanner.max_velocity = units.Velocity("200 um/s") # TODO, put this in z scanner config
+        self.hw.objective_z_scanner.acceleration = units.Acceleration("1 mm/s^2")
 
         # set strip velocity
         self._original_web_velocity = self._web_axis_stage.max_velocity
