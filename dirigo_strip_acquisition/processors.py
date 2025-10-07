@@ -52,7 +52,7 @@ def _line_placement_kernel(strip: np.ndarray,     # dim order (web, scan, chan)
         # for each source-pixel index j, compute its destination-index and copy
         for j in range(n_width):
             # pick the source column (mirrored if requested)
-            src_j = n_width - 1 - j if flip_line else j
+            src_j = j if flip_line else n_width - 1 - j
             dst_j = j + cur_shift
 
             if dst_j < 0 or dst_j >= n_width:
@@ -146,12 +146,12 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
 
                             # add lines to current strip
                             self._prev_row = _line_placement_kernel( 
-                                strip=strip.data, 
-                                lines=frame.data,
-                                positions=strip_positions,
-                                pixel_size=self._spec.pixel_size,
-                                prev_row=self._prev_row,
-                                flip_line=False
+                                strip       = strip.data, 
+                                lines       = frame.data,
+                                positions   = strip_positions,
+                                pixel_size  = self._spec.pixel_size,
+                                prev_row    = self._prev_row,
+                                flip_line   = False # update
                             )
 
                             if next_z or next_strip:
@@ -185,12 +185,12 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
                                 strip_positions = positions - strip_center_min[np.newaxis,:]
                                 
                                 self._prev_row = _line_placement_kernel( 
-                                    strip=strip.data, 
-                                    lines=frame.data,
-                                    positions=strip_positions,
-                                    pixel_size=self._spec.pixel_size,
-                                    prev_row=self._prev_row,
-                                    flip_line=False
+                                    strip       = strip.data, 
+                                    lines       = frame.data,
+                                    positions   = strip_positions,
+                                    pixel_size  = self._spec.pixel_size,
+                                    prev_row    = self._prev_row,
+                                    flip_line   = False # update
                                 )
                                 break
 
