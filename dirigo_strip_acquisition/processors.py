@@ -12,7 +12,8 @@ from dirigo.plugins.processors import RasterFrameProcessor
 
 from dirigo_strip_acquisition.acquisitions import (
     RasterScanStitchedAcquisitionSpec, LineCameraStitchedAcquisitionSpec,
-    RasterScanStitchedAcquisition, LineCameraStitchedAcquisition
+    RasterScanStitchedAcquisition, LineCameraStitchedAcquisition,
+    RectangularFieldStagePositionHelper
 )
 
 
@@ -82,17 +83,25 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
             self._scan_axis_label = self._acquisition.system_config.line_camera['axis']
         self._system_config = self._acquisition.system_config
         self._data_range = upstream.data_range
-        self._positioner = self._acquisition.positioner
+        self._positioner = RectangularFieldStagePositionHelper(
+            scan_axis   = self._scan_axis_label,
+            axis_error  = self._acquisition.runtime_info.stage_scanner_angle,
+            line_width  = self._spec.line_width, # TODO, remove line_width since it's already in spec
+            spec        = self._spec
+        )
 
         # positions are stored in order (web, scan)
         prev_position = (self._positioner.web_min(0), self._positioner.scan_center(0))
         self._prev_position = np.array(prev_position, dtype=np.float64)
 
-        # _acquisition.final_shape: (z, scan, web, channel)
-        self._strip_shape = ( # WARNING strips are assembled in dim order: (web, scan, chan)
-            self._acquisition.final_shape[2],
+        if self._scan_axis_label == "x":
+            n_pixels_web = round(self._spec.y_range.range / self._spec.pixel_size)
+        else:
+            n_pixels_web = round(self._spec.x_range.range / self._spec.pixel_size)
+        self._strip_shape = ( # strips are assembled in dim order: (web, scan, chan)
+            n_pixels_web,
             self._spec.pixels_per_line,
-            self._acquisition.final_shape[3]
+            self._acquisition.product_shape[2]
         )
 
         self._init_product_pool(
@@ -223,9 +232,8 @@ class StripStitcher(Processor[StripProcessor]):
         self._data_range = upstream.data_range
 
         self._spec: RasterScanStitchedAcquisitionSpec | LineCameraStitchedAcquisitionSpec
-        self._n_strips = upstream._positioner.n_strips
-        #self._strip_height = upstream.product_shape[0]
-        #self._strip_dtype = upstream.product_dtype
+        self.n_strips = upstream._positioner.n_strips
+
         self._overlap_pixels = round(self._spec.strip_overlap * self._spec.pixels_per_line)
 
         self._init_product_pool(
@@ -298,7 +306,7 @@ class StripStitcher(Processor[StripProcessor]):
                     stitched_strip.data[...] = in_strip.data
                     stitched_strip.indices = tuple(in_strip.indices)
 
-                    if in_strip.indices[1] == self._n_strips - 1:
+                    if in_strip.indices[1] == self.n_strips - 1:
                         # on last strip of the z opt. section, publish last strip
                         correction = np.linspace(prev_correction, 1, b.shape[1])
                         stitched_strip.data[...] = (b * correction[None,:,:]).astype(np.int16)
@@ -363,7 +371,7 @@ class TileBuilder(Processor[StripStitcher]):
 
         self._data_range = upstream.data_range
         self._tile_shape = tile_shape
-        self._n_channels = self._acquisition.final_shape[-1] # (z, scan, web, chan)
+        self._n_channels = self._acquisition.product_shape[2] # (z, scan, web, chan)
 
         self._init_product_pool(
             n =     10,     # TODO how should this be set?
@@ -371,13 +379,16 @@ class TileBuilder(Processor[StripStitcher]):
             dtype = np.int16
         )
 
-        self._n_strips = self._acquisition.positioner.n_strips
-        self._tiles_web  = math.ceil(   # tiles along the web dimension (strip long axis)
-            self._acquisition.final_shape[-2] / tile_shape[0]
-        ) 
-        self._tiles_scan = math.ceil(   # tiles along the scan dimension (strip short axis)
-            self._acquisition.final_shape[-3] / tile_shape[0]
-        ) 
+        self._n_strips = upstream.n_strips
+
+        if self._acquisition.system_config.fast_raster_scanner['axis'] == 'x':
+            self.n_pixels_scan = round(self._spec.x_range.range / self._spec.pixel_size)
+            self.n_pixels_web  = round(self._spec.y_range.range / self._spec.pixel_size)
+        else:
+            self.n_pixels_scan = round(self._spec.y_range.range / self._spec.pixel_size)
+            self.n_pixels_web  = round(self._spec.x_range.range / self._spec.pixel_size)
+        self._tiles_web  = math.ceil(self.n_pixels_web / tile_shape[0])  # tiles along the web dimension (strip long axis)
+        self._tiles_scan = math.ceil(self.n_pixels_scan / tile_shape[0]) # tiles along the scan dimension (strip short axis)
         self._tiles_image = self._tiles_web * self._tiles_scan
 
         self._leftovers: Optional[np.ndarray] = None

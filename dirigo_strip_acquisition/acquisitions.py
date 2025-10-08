@@ -271,10 +271,10 @@ class StitchedAcquisition(Acquisition, ABC):
             axis_error = self.hw.camera_optics.stage_camera_angle
 
         self.positioner = RectangularFieldStagePositionHelper(
-            scan_axis=self._strip_acquisition.axis,
-            axis_error=axis_error,
-            line_width=self._strip_acquisition.spec.line_width, # TODO, remove line_width since it's already in spec
-            spec=spec
+            scan_axis   = self._strip_acquisition.axis,
+            axis_error  = axis_error,
+            line_width  = self._strip_acquisition.spec.line_width, # TODO, remove line_width since it's already in spec
+            spec        = spec
         )
         self._final_shape = (self.spec.z_steps, n_pixels_scan, n_pixels_web, n_channels) 
 
@@ -550,7 +550,7 @@ class RectangularFieldStagePositionHelper:
     """Encapsulates stage runtime position calculations."""
     EPS = units.Position(1e-9)
     def __init__(self, 
-                 scan_axis: str, 
+                 scan_axis: str,        # fast axis 
                  axis_error: units.Angle, 
                  line_width: units.Position,
                  spec: StitchedAcquisitionSpec):

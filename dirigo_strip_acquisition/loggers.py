@@ -5,7 +5,7 @@ import tifffile
 import numpy as np
 
 from dirigo.sw_interfaces.worker import EndOfStream
-from dirigo.sw_interfaces import Logger
+from dirigo.sw_interfaces import Logger, Processor
 from dirigo_strip_acquisition.processors import (
     TileBuilder, TileProduct, downsample_kernel
 )
@@ -16,7 +16,7 @@ from dirigo_strip_acquisition.acquisitions import StitchedAcquisition
 class PyramidLogger(Logger):
 
     def __init__(self, 
-                 upstream: TileBuilder, 
+                 upstream: Processor, 
                  levels: tuple = (1, 2, 8),
                  basename: str = "experiment",
                  compression: Optional[None] = None):
@@ -26,7 +26,19 @@ class PyramidLogger(Logger):
         self.file_ext = "ome.tif"
         
         self._n_channels = upstream.product_shape[2]
-        self._shape      = (*self._acquisition.final_shape[:3], self._n_channels)
+        spec = self._acquisition.spec
+        if self._acquisition.system_config.fast_raster_scanner['axis'] == 'x':
+            n_pixels_scan = round(spec.x_range.range / spec.pixel_size)
+            n_pixels_web  = round(spec.y_range.range / spec.pixel_size)
+        else:
+            n_pixels_scan = round(spec.y_range.range / spec.pixel_size)
+            n_pixels_web  = round(spec.x_range.range / spec.pixel_size)
+        self._shape = (
+            self._acquisition.spec.z_steps,
+            n_pixels_scan,
+            n_pixels_web,
+            self._n_channels
+        )
         self._dtype      = upstream.product_dtype
         self._tile_shape = upstream.product_shape[:2]
         self._levels     = levels
