@@ -142,19 +142,44 @@ class SignalGradientLogger(Logger):
                     else:
                         self._strip_sum = _sum_high_signal_lines(frame.data, 100)
 
-        except:
-            self.save_data(self._strip_sum)
+        except EndOfStream:
+            self.save_data()
 
         finally:
             self._publish(None)
 
-    def save_data(self, strip_sum: np.ndarray):
+    def save_data(self):
         # average traces
         spec = self._acquisition.spec
         w = spec.line_width
         n_x = round(w / spec.pixel_size)
         x = np.linspace(-w/2, w/2, n_x)
-        strip_sum = strip_sum.astype(np.float64)
+        strip_sum = self._strip_sum.astype(np.float64)
+
+        # smooth traces
+        smoothed = savgol_filter(
+            x               = strip_sum, 
+            window_length   = 101, 
+            polyorder       = 3,
+            axis            = 0
+        )
+           
+        # Normalize & record traces
+        smoothed = smoothed / np.max(smoothed, axis=0, keepdims=True)
+        np.savetxt(
+            fname       = self.filepath, 
+            X           = np.concatenate([x[:,None],smoothed], axis=1), 
+            delimiter   = ',',
+            header      = "x (m),channel 1, channel 2"
+        )
+
+    def plot_results(self):
+        # average traces
+        spec = self._acquisition.spec
+        w = spec.line_width
+        n_x = round(w / spec.pixel_size)
+        x = np.linspace(-w/2, w/2, n_x)
+        strip_sum = self._strip_sum.astype(np.float64)
 
         # smooth traces
         smoothed = savgol_filter(
@@ -164,36 +189,25 @@ class SignalGradientLogger(Logger):
             axis            = 0
         )
 
-        # Plot results (optional)
-        if self.show_results:
-            fig, ax1 = plt.subplots(figsize=(8, 5))
-            y_label = "Intensity (au)"
-            x_label = "Position (um)"
+        fig, ax1 = plt.subplots(figsize=(8, 5))
+        y_label = "Intensity (au)"
+        x_label = "Position (um)"
 
-            ax1.scatter(x*1e6, strip_sum[:,0], color="tab:blue", label=y_label)
-            ax1.plot(x*1e6, smoothed[:,0], color="tab:blue", label=y_label)
-            ax1.set_xlabel(x_label)
-            ax1.set_ylabel(y_label, color="tab:blue")
-            ax1.tick_params(axis="y", labelcolor="tab:blue")
+        ax1.scatter(x*1e6, strip_sum[:,0], color="tab:blue", label=y_label)
+        ax1.plot(x*1e6, smoothed[:,0], color="tab:blue", label=y_label)
+        ax1.set_xlabel(x_label)
+        ax1.set_ylabel(y_label, color="tab:blue")
+        ax1.tick_params(axis="y", labelcolor="tab:blue")
 
-            ax2 = ax1.twinx()
-            ax2.scatter(x*1e6, strip_sum[:,1], color="tab:red", label=y_label)
-            ax2.plot(x*1e6, smoothed[:,1], color="tab:red", label=y_label)
-            ax2.set_ylabel(y_label, color="tab:red")
-            ax2.tick_params(axis="y", labelcolor="tab:red")
-            
-            ax1.grid(True, which="both", ls="--", alpha=0.4)
-            fig.tight_layout()
-            plt.show()
-
-        # Normalize & record traces
-        smoothed = smoothed / np.max(smoothed, axis=0, keepdims=True)
-        np.savetxt(
-            fname       = self.filepath, 
-            X           = np.concat([x[:,None],smoothed], axis=1), 
-            delimiter   = ',',
-            header      = "x (m),channel 1, channel 2"
-        )
+        ax2 = ax1.twinx()
+        ax2.scatter(x*1e6, strip_sum[:,1], color="tab:red", label=y_label)
+        ax2.plot(x*1e6, smoothed[:,1], color="tab:red", label=y_label)
+        ax2.set_ylabel(y_label, color="tab:red")
+        ax2.tick_params(axis="y", labelcolor="tab:red")
+        
+        ax1.grid(True, which="both", ls="--", alpha=0.4)
+        fig.tight_layout()
+        plt.show()
 
 
 

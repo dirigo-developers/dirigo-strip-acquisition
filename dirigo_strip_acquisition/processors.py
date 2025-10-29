@@ -79,13 +79,16 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
         self._acquisition: RasterScanStitchedAcquisition | LineCameraStitchedAcquisition
         if isinstance(self._spec, RasterScanStitchedAcquisitionSpec):
             self._scan_axis_label = self._acquisition.system_config.fast_raster_scanner['axis']
+            axis_error = self._acquisition.runtime_info.stage_scanner_angle
         else:
             self._scan_axis_label = self._acquisition.system_config.line_camera['axis']
+            axis_error = units.Angle(0) # TODO fix this for more precise micro-macro positioning
+
         self._system_config = self._acquisition.system_config
         self._data_range = upstream.data_range
         self._positioner = RectangularFieldStagePositionHelper(
             scan_axis   = self._scan_axis_label,
-            axis_error  = self._acquisition.runtime_info.stage_scanner_angle,
+            axis_error  = axis_error,
             line_width  = self._spec.line_width, # TODO, remove line_width since it's already in spec
             spec        = self._spec
         )
@@ -98,10 +101,11 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
             n_pixels_web = round(self._spec.y_range.range / self._spec.pixel_size)
         else:
             n_pixels_web = round(self._spec.x_range.range / self._spec.pixel_size)
+
         self._strip_shape = ( # strips are assembled in dim order: (web, scan, chan)
             n_pixels_web,
             self._spec.pixels_per_line,
-            self._acquisition.product_shape[2]
+            self._acquisition.runtime_info.n_channels
         )
 
         self._init_product_pool(
@@ -371,7 +375,7 @@ class TileBuilder(Processor[StripStitcher]):
 
         self._data_range = upstream.data_range
         self._tile_shape = tile_shape
-        self._n_channels = self._acquisition.product_shape[2] # (z, scan, web, chan)
+        self._n_channels = self._acquisition.runtime_info.n_channels
 
         self._init_product_pool(
             n =     10,     # TODO how should this be set?
