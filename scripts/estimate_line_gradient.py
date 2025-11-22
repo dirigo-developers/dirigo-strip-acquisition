@@ -8,7 +8,7 @@ chunk of endometrium)
 from dirigo.plugins.loaders import RawRasterFrameLoader
 from dirigo.plugins.processors import RasterFrameProcessor
 from dirigo_strip_acquisition.acquisitions import RasterScanStitchedAcquisitionSpec
-from dirigo_strip_acquisition.analysis import SignalGradientLogger
+from dirigo_strip_acquisition.analysis import SignalGradientWriter
 
 
 
@@ -20,16 +20,16 @@ if __name__ == "__main__":
         spec_class  = RasterScanStitchedAcquisitionSpec
     )
     processor       = RasterFrameProcessor(upstream=loader)
-    gradient_logger = SignalGradientLogger(upstream=processor)
-    gradient_logger.show_results = True
+    gradient_writer = SignalGradientWriter(upstream=processor)
+    gradient_writer.show_results = True
 
     loader.add_subscriber(processor)
-    processor.add_subscriber(gradient_logger)
+    processor.add_subscriber(gradient_writer)
 
-    gradient_logger.start()
+    gradient_writer.start()
     processor.start()
     loader.start()  # <-- kicks everything off
 
-    gradient_logger.join()
+    gradient_writer.join()
 
-    gradient_logger.plot_results()
+    gradient_writer.plot_results()

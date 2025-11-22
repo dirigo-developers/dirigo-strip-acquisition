@@ -362,7 +362,7 @@ class TileProduct(Product):
 
 
 class TileBuilder(Processor[StripStitcher]):
-    """Parcels up tiles to send to file logger."""
+    """Parcels up tiles to send to file writer."""
     Product = TileProduct
 
     def __init__(self, upstream: StripStitcher, tile_shape=(512,512)):

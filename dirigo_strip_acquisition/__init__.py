@@ -5,11 +5,11 @@ from dirigo_strip_acquisition.acquisitions import (
 from dirigo_strip_acquisition.processors import (
     StripProcessor, StripStitcher, TileBuilder, StitchedPreview
 )
-from dirigo_strip_acquisition.loggers import PyramidLogger
+from dirigo_strip_acquisition.writers import PyramidWriter
 
 __all__ = [
     'RasterScanStitchedAcquisitionSpec', 'RasterScanStitchedAcquisition', 
     'LineCameraStitchedAcquisitionSpec', 'LineCameraStitchedAcquisition',
     'StripProcessor', 'StripStitcher', 'TileBuilder', 'StitchedPreview',
-    'PyramidLogger'
+    'PyramidWriter'
 ]

@@ -21,7 +21,7 @@ disp_processor  = diri.make_display_processor(
 disp_processor.display_channels[0].display_min = 0
 disp_processor.display_channels[0].display_max = 32000
 
-logger          = diri.make_logger("tiff", upstream=disp_processor)
+writer          = diri.make_writer("tiff", upstream=disp_processor)
 
 
 acquisition.start()

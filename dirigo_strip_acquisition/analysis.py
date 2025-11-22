@@ -11,19 +11,19 @@ from scipy.signal import savgol_filter
 
 from dirigo.components.io import SystemConfig, config_path
 from dirigo.sw_interfaces.worker import EndOfStream
-from dirigo.sw_interfaces.logger import Logger
+from dirigo.sw_interfaces.writer import Writer
 from dirigo.sw_interfaces.acquisition import AcquisitionProduct, Loader
 from dirigo.sw_interfaces.processor import ProcessorProduct
 from dirigo.hw_interfaces.digitizer import DigitizerProfile
 from dirigo.plugins.acquisitions import LineAcquisitionRuntimeInfo
-from dirigo.plugins.loggers import TiffLogger
+from dirigo.plugins.writers import TiffWriter
 from dirigo.plugins.processors import RasterFrameProcessor
 from dirigo.plugins.loaders import deserialize_float64_list
 from dirigo_strip_acquisition.acquisitions import (
     RectangularFieldStagePositionHelper, RasterScanStitchedAcquisitionSpec
 )
 from dirigo_strip_acquisition.processors import StripProcessor, StripStitcher, TileBuilder
-from dirigo_strip_acquisition.loggers import PyramidLogger
+from dirigo_strip_acquisition.writers import PyramidWriter
 
 
 
@@ -42,16 +42,16 @@ class StripAcquisitionLoader(Loader):
 
             tags = tif.pages[0].tags
 
-            cfg_dict = json.loads(tags[TiffLogger.SYSTEM_CONFIG_TAG].value)
+            cfg_dict = json.loads(tags[TiffWriter.SYSTEM_CONFIG_TAG].value)
             self.system_config = SystemConfig(cfg_dict)
 
-            runtime_dict = json.loads(tags[TiffLogger.RUNTIME_INFO_TAG].value)
+            runtime_dict = json.loads(tags[TiffWriter.RUNTIME_INFO_TAG].value)
             self.runtime_info = LineAcquisitionRuntimeInfo.from_dict(runtime_dict)
 
-            spec_dict = json.loads(tags[TiffLogger.ACQUISITION_SPEC_TAG].value)
+            spec_dict = json.loads(tags[TiffWriter.ACQUISITION_SPEC_TAG].value)
             self.spec = RasterScanStitchedAcquisitionSpec(**spec_dict)
 
-            digi_dict = json.loads(tags[TiffLogger.DIGITIZER_PROFILE_TAG].value)
+            digi_dict = json.loads(tags[TiffWriter.DIGITIZER_PROFILE_TAG].value)
             self.digitizer_profile = DigitizerProfile.from_dict(digi_dict)
 
         self.positioner = RectangularFieldStagePositionHelper(
@@ -83,10 +83,10 @@ class StripAcquisitionLoader(Loader):
                 n_frames = len(tif.pages)
                 
                 self._timestamps = deserialize_float64_list(
-                    tif.pages[0].tags[TiffLogger.TIMESTAMPS_TAG].value
+                    tif.pages[0].tags[TiffWriter.TIMESTAMPS_TAG].value
                 )
                 self._positions = deserialize_float64_list(
-                    tif.pages[0].tags[TiffLogger.POSITIONS_TAG].value
+                    tif.pages[0].tags[TiffWriter.POSITIONS_TAG].value
                 )
 
                 while frames_read < n_frames:
@@ -122,7 +122,7 @@ def _sum_high_signal_lines(frame, thresh):
     return out
 
 
-class SignalGradientLogger(Logger):
+class SignalGradientWriter(Writer):
     def __init__(self, upstream):
         super().__init__(upstream)
         self._strip_sum = None
@@ -211,7 +211,7 @@ class SignalGradientLogger(Logger):
 
 
 
-class LineTimestampLogger(Logger):
+class LineTimestampWriter(Writer):
     """Log all the line timestamps"""
     def __init__(self, upstream):
         super().__init__(upstream)
@@ -238,7 +238,7 @@ class LineTimestampLogger(Logger):
         plt.show()
 
 
-class PhaseLogger(Logger):
+class PhaseWriter(Writer):
     """Log all the line timestamps"""
     def __init__(self, upstream):
         super().__init__(upstream)
@@ -263,7 +263,7 @@ class PhaseLogger(Logger):
         plt.show()
 
 
-class PositionLogger(Logger):
+class PositionWriter(Writer):
     """Log all positions"""
     def __init__(self, upstream):
         super().__init__(upstream)
@@ -299,40 +299,40 @@ if __name__ == "__main__":
     fn = r"D:\dirigo test data\gyn3_scan_raw_0.tif"
 
     loader = StripAcquisitionLoader(fn)
-    timestamper = LineTimestampLogger(upstream=loader)
-    #positioner = PositionLogger(upstream=loader)
+    timestamper = LineTimestampWriter(upstream=loader)
+    #positioner = PositionWriter(upstream=loader)
     processor = RasterFrameProcessor(upstream=loader)
-    # phaser = PhaseLogger(upstream=processor)
+    # phaser = PhaseWriter(upstream=processor)
     strip_processor = StripProcessor(upstream=processor)
     strip_stitcher = StripStitcher(upstream=strip_processor)
-    # strip_logger = TiffLogger(upstream=strip_stitcher)
-    # strip_logger.frames_per_file = 100
+    # strip_writer = TiffWriter(upstream=strip_stitcher)
+    # strip_writer.frames_per_file = 100
     tile_builder = TileBuilder(upstream=strip_stitcher)
-    logger = PyramidLogger(upstream=tile_builder)
+    writer = PyramidWriter(upstream=tile_builder)
 
     loader.add_subscriber(timestamper)
     #loader.add_subscriber(positioner)
     loader.add_subscriber(processor)
     # processor.add_subscriber(phaser)
     processor.add_subscriber(strip_processor)
-    #strip_processor.add_subscriber(strip_logger)
+    #strip_processor.add_subscriber(strip_writer)
     strip_processor.add_subscriber(strip_stitcher)
     strip_stitcher.add_subscriber(tile_builder)
-    # strip_stitcher.add_subscriber(strip_logger)
-    tile_builder.add_subscriber(logger)
+    # strip_stitcher.add_subscriber(strip_writer)
+    tile_builder.add_subscriber(writer)
 
     timestamper.start()
     #positioner.start()
     processor.start()
     # phaser.start()
     strip_processor.start()
-    # strip_logger.start()
+    # strip_writer.start()
     strip_stitcher.start()
     tile_builder.start()
-    logger.start()
+    writer.start()
 
     loader.start()
 
-    logger.join(30)
+    writer.join(30)
 
     # timestamper.save_data()

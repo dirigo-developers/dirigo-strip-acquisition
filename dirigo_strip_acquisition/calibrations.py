@@ -4,14 +4,14 @@ from scipy import fft
 
 from dirigo import io, units
 from dirigo.sw_interfaces.worker import EndOfStream
-from dirigo.sw_interfaces.logger import Logger
+from dirigo.sw_interfaces.writer import Writer
 from dirigo.sw_interfaces.processor import ProcessorProduct
 
 from dirigo_strip_acquisition import LineCameraStitchedAcquisition
 
 
 
-class StripTranslationCalibrationLogger(Logger):
+class StripTranslationCalibrationWriter(Writer):
     UPSAMPLE_X     = 20
     UPSAMPLE_Y     = 1
     EPS            = 1e-1

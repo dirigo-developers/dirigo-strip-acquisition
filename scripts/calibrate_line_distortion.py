@@ -48,10 +48,10 @@ spec.strip_overlap = 1 - TRANSLATION / spec.line_width
 acquisition     = diri.make_acquisition("line_camera_stitched", spec=spec)
 line_processor  = diri.make_processor("line_camera_line", upstream=acquisition)
 strip_processor = diri.make_processor("strip", upstream=line_processor)
-logger          = diri.make_logger("strip_translation_calibration", upstream=strip_processor)
+writer          = diri.make_writer("strip_translation_calibration", upstream=strip_processor)
 
-# raw_logger      = diri.make_logger("tiff", upstream=strip_processor)
-# raw_logger.frames_per_file = 100
+# raw_writer      = diri.make_writer("tiff", upstream=strip_processor)
+# raw_writer.frames_per_file = 100
 
 
 acquisition.start()

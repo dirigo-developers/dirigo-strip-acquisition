@@ -37,19 +37,19 @@ strip_stitcher  = diri.make_processor("strip_stitcher", upstream=strip_processor
 #     channel.display_min = 0
 #     channel.display_max = 4000
 
-# pyramid_logger  = diri.make_logger(
+# pyramid_writer  = diri.make_writer(
 #     name            = "pyramid", 
 #     upstream        = colorizer,
 #     levels          = (1, 2, 4, 8, 16, 32),
 #     compression     = 'jpeg'
 # )
 
-strip_logger = diri.make_logger(
+strip_writer = diri.make_writer(
     name        = "tiff",
     upstream    = strip_stitcher
 )
 
 
 acquisition.start()
-strip_logger.join()
+strip_writer.join()
 

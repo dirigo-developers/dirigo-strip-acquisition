@@ -5,7 +5,7 @@ import tifffile
 import numpy as np
 
 from dirigo.sw_interfaces.worker import EndOfStream
-from dirigo.sw_interfaces import Logger, Processor
+from dirigo.sw_interfaces import Writer, Processor
 from dirigo_strip_acquisition.processors import (
     TileBuilder, TileProduct, downsample_kernel
 )
@@ -13,7 +13,7 @@ from dirigo_strip_acquisition.acquisitions import StitchedAcquisition
 
 
 
-class PyramidLogger(Logger):
+class PyramidWriter(Writer):
 
     def __init__(self, 
                  upstream: Processor, 
