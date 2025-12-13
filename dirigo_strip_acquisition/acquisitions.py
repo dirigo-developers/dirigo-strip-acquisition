@@ -445,7 +445,7 @@ class RasterScanStitchedAcquisitionSpec(StitchedAcquisitionSpec, RasterScanStrip
                  strip_overlap: float,
                  line_width: units.Position | str,
                  pixel_size: units.Position | str,
-                 fill_fraction: float,
+                 line_duty_cycle: float,
                  bidirectional_scanning: bool,
                  lines_per_buffer: int,
                  **kwargs) -> None:
@@ -459,11 +459,11 @@ class RasterScanStitchedAcquisitionSpec(StitchedAcquisitionSpec, RasterScanStrip
         )
         RasterScanStripAcquisitionSpec.__init__(
             self,
-            line_width=line_width,
-            pixel_size=pixel_size,
-            fill_fraction=fill_fraction,
-            bidirectional_scanning=bidirectional_scanning,
-            lines_per_buffer=lines_per_buffer
+            line_width              = line_width,
+            pixel_size              = pixel_size,
+            line_duty_cycle         = line_duty_cycle,
+            bidirectional_scanning  = bidirectional_scanning,
+            lines_per_buffer        = lines_per_buffer
         )
 
 
