@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dirigo_strip_acquisition"
-version = "0.1.1"
+version = "0.1.2"
 description = "Plugin for strip acquisitions in Dirigo."
 authors = [
     {name = "T. D. Weber", email = "tweber@mit.edu"}
