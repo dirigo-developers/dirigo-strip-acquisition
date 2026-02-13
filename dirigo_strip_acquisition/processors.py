@@ -27,8 +27,8 @@ uint8_3d_readonly  = types.Array(types.uint8, 3, 'C', readonly=True)
 int16_3d_readonly  = types.Array(types.int16, 3, 'C', readonly=True)
 
 sig = [
-#         strip         lines               positions     pixel_size  prev_row  flip_line
-    int64(int16[:,:,:], int16_3d_readonly,  float64[:,:], float64,    int64,    boolean),
+#         strip         lines               positions     pixel_size  prev_row  flip_line  flip_strip
+    int64(int16[:,:,:], int16_3d_readonly,  float64[:,:], float64,    int64,    boolean,   boolean),
 ]
 @njit(sig, parallel=True, fastmath=True, cache=True)
 def _line_placement_kernel(strip: np.ndarray,     # dim order (web, scan, chan)
@@ -36,38 +36,86 @@ def _line_placement_kernel(strip: np.ndarray,     # dim order (web, scan, chan)
                            positions: np.ndarray, # dim order (web, scan)
                            pixel_size: float,
                            prev_row: int,
-                           flip_line: bool) -> int:
+                           flip_line: bool,
+                           flip_strip: bool) -> int:
     n_height, n_width, n_chan = strip.shape
 
-    for idx in prange(lines.shape[0]):
-        # compute where this line should go
-        if idx > 0:
-            prev_row = int(round(positions[idx-1, 0] / pixel_size))
-        cur_row   = int(round(positions[idx, 0] / pixel_size))
-        cur_shift = int(round(positions[idx, 1] / pixel_size))
+    # for idx in prange(lines.shape[0]):
+    #     # compute where this line should go
+    #     if idx > 0:
+    #         prev_row = int(round(positions[idx-1, 0] / pixel_size))
+    #     cur_row   = int(round(positions[idx, 0] / pixel_size))
+    #     cur_shift = int(round(positions[idx, 1] / pixel_size))
 
-        # skip if the line is out of web dim bounds
-        if (cur_row < 0) or (cur_row >= n_height):
+    #     # skip if the line is out of web dim bounds
+    #     if (cur_row < 0) or (cur_row >= n_height):
+    #         continue
+
+    #     # for each source-pixel index j, compute its destination-index and copy
+    #     for j in range(n_width):
+    #         # pick the source column (mirrored if requested)
+    #         src_j = j if flip_line else n_width - 1 - j
+    #         dst_j = j + cur_shift
+
+    #         if dst_j < 0 or dst_j >= n_width:
+    #             continue        # skip if out of bounds laterally
+
+    #         strip[cur_row, dst_j, :] = lines[idx, src_j, :]
+
+    #     # Nearest neighbor interpolation
+    #     if abs(cur_row - prev_row) == 2:
+    #         for j in range(n_width):
+    #             strip[(cur_row + prev_row)//2, j, :] = strip[cur_row, j, :]
+
+    # # returns the last placed row
+    # return int(round(positions[lines.shape[0]-1, 0] / pixel_size))
+
+    for idx in prange(lines.shape[0]):
+        # --- compute raw (unflipped) rows/shifts in pixel units ---
+        if idx > 0:
+            raw_prev_row = int(round(positions[idx - 1, 0] / pixel_size))
+        else:
+            raw_prev_row = prev_row
+
+        raw_cur_row = int(round(positions[idx, 0] / pixel_size))
+        cur_shift   = int(round(positions[idx, 1] / pixel_size))
+
+        # --- map to destination row, optionally flipping the strip (web dimension) ---
+        if flip_strip:
+            prev_row_dst = (n_height - 1) - raw_prev_row
+            cur_row_dst  = (n_height - 1) - raw_cur_row
+        else:
+            prev_row_dst = raw_prev_row
+            cur_row_dst  = raw_cur_row
+
+        # skip if the destination row is out of bounds
+        if (cur_row_dst < 0) or (cur_row_dst >= n_height):
             continue
 
         # for each source-pixel index j, compute its destination-index and copy
         for j in range(n_width):
             # pick the source column (mirrored if requested)
-            src_j = j if flip_line else n_width - 1 - j
+            src_j = j if (not flip_line) else (n_width - 1 - j)
             dst_j = j + cur_shift
 
             if dst_j < 0 or dst_j >= n_width:
-                continue        # skip if out of bounds laterally
+                continue
 
-            strip[cur_row, dst_j, :] = lines[idx, src_j, :]
+            strip[cur_row_dst, dst_j, :] = lines[idx, src_j, :]
 
-        # Nearest neighbor interpolation
-        if abs(cur_row - prev_row) == 2:
-            for j in range(n_width):
-                strip[(cur_row + prev_row)//2, j, :] = strip[cur_row, j, :]
+        # Nearest-neighbor interpolation (in destination-row coordinates)
+        if abs(cur_row_dst - prev_row_dst) == 2:
+            mid_row = (cur_row_dst + prev_row_dst) // 2
+            if 0 <= mid_row < n_height:
+                for j in range(n_width):
+                    strip[mid_row, j, :] = strip[cur_row_dst, j, :]
 
-    # returns the last placed row
-    return int(round(positions[lines.shape[0]-1, 0] / pixel_size))
+        # keep prev_row consistent with destination coordinates for subsequent idx==0 logic (if needed)
+        prev_row = cur_row_dst
+
+    # return the last placed row (destination coordinates)
+    raw_last = int(round(positions[lines.shape[0] - 1, 0] / pixel_size))
+    return (n_height - 1) - raw_last if flip_strip else raw_last
 
 
 class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be used with a LineCamera Processor (not limited to raster)
@@ -164,7 +212,8 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
                                 positions   = strip_positions,
                                 pixel_size  = self._spec.pixel_size,
                                 prev_row    = self._prev_row,
-                                flip_line   = False # update
+                                flip_line   = False, #False # update
+                                flip_strip  = True
                             )
 
                             if next_z or next_strip:
@@ -203,7 +252,8 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
                                     positions   = strip_positions,
                                     pixel_size  = self._spec.pixel_size,
                                     prev_row    = self._prev_row,
-                                    flip_line   = False # update
+                                    flip_line   = False, # update
+                                    flip_strip  = True
                                 )
                                 break
 
