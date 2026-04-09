@@ -578,12 +578,14 @@ class StitchedPreview(Processor):
     def __init__(self, 
                  upstream: TileBuilder, 
                  downsample: int = 16,
+                 show_progress: bool = True,
                  **kwargs):
         super().__init__(upstream, **kwargs)
         self._hold = True # effectively holds off starting run loop until a subscriber is added
         self._acquisition: RasterScanStitchedAcquisition
         self._data_range = upstream.data_range
         self._downsample = downsample
+        self._show_progress = show_progress
 
         # Product is a downsampled version of the full stitched image       
         self._downsampled_tile_length = upstream.product_shape[0] // downsample
@@ -612,12 +614,12 @@ class StitchedPreview(Processor):
         while self._hold:
             # trick to avoid deadlock: getting stuck at _receive_product()
             time.sleep(0.05)
+        
+        preview = self._get_free_product()
+
         try:
             for tz in range(self._z_levels):
                 for ts in range(self._tiles_scan):
-                    # Get the preview product from the pool
-                    preview = self._get_free_product()
-
                     # work through all the tiles along the web direction, then publish
                     for tw in range(self._tiles_web):
 
@@ -631,8 +633,11 @@ class StitchedPreview(Processor):
                             preview.data[i0:i1, j0:j1, :] = \
                                 downsample_kernel(tile.data, self._downsample)
 
-                    self._publish(preview)
-                    # print(f"Published preview(s) on scan row {ts} of {self._tiles_scan}")
+                    if self._show_progress:
+                        self._publish(preview)
+                        preview = self._get_free_product()
+                    elif ts == (self._tiles_scan - 1):
+                        self._publish(preview)
 
             self._publish(None) # forward sentinel None
 
