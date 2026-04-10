@@ -8,12 +8,13 @@ from numpy.polynomial.polynomial import Polynomial
 from dirigo import units, io
 from dirigo.sw_interfaces.worker import Product, EndOfStream, Worker
 from dirigo.sw_interfaces.processor import Processor, ProcessorProduct
+from dirigo.plugins.acquisitions import LineAcquisitionRuntimeInfo, CameraAcquisitionRuntimeInfo
 from dirigo.plugins.processors import RasterFrameProcessor
 
 from dirigo_strip_acquisition.acquisitions import (
     RasterScanStitchedAcquisitionSpec, LineCameraStitchedAcquisitionSpec,
     RasterScanStitchedAcquisition, LineCameraStitchedAcquisition,
-    RectangularFieldStagePositionHelper
+    RectangularFieldStagePositionHelper,
 )
 
 
@@ -39,36 +40,6 @@ def _line_placement_kernel(strip: np.ndarray,     # dim order (web, scan, chan)
                            flip_line: bool,
                            flip_strip: bool) -> int:
     n_height, n_width, n_chan = strip.shape
-
-    # for idx in prange(lines.shape[0]):
-    #     # compute where this line should go
-    #     if idx > 0:
-    #         prev_row = int(round(positions[idx-1, 0] / pixel_size))
-    #     cur_row   = int(round(positions[idx, 0] / pixel_size))
-    #     cur_shift = int(round(positions[idx, 1] / pixel_size))
-
-    #     # skip if the line is out of web dim bounds
-    #     if (cur_row < 0) or (cur_row >= n_height):
-    #         continue
-
-    #     # for each source-pixel index j, compute its destination-index and copy
-    #     for j in range(n_width):
-    #         # pick the source column (mirrored if requested)
-    #         src_j = j if flip_line else n_width - 1 - j
-    #         dst_j = j + cur_shift
-
-    #         if dst_j < 0 or dst_j >= n_width:
-    #             continue        # skip if out of bounds laterally
-
-    #         strip[cur_row, dst_j, :] = lines[idx, src_j, :]
-
-    #     # Nearest neighbor interpolation
-    #     if abs(cur_row - prev_row) == 2:
-    #         for j in range(n_width):
-    #             strip[(cur_row + prev_row)//2, j, :] = strip[cur_row, j, :]
-
-    # # returns the last placed row
-    # return int(round(positions[lines.shape[0]-1, 0] / pixel_size))
 
     for idx in prange(lines.shape[0]):
         # --- compute raw (unflipped) rows/shifts in pixel units ---
@@ -121,7 +92,7 @@ def _line_placement_kernel(strip: np.ndarray,     # dim order (web, scan, chan)
 class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be used with a LineCamera Processor (not limited to raster)
     """Receives position-encoded line data and places lines into strip."""
     def __init__(self, upstream: RasterFrameProcessor):
-        super().__init__(upstream)
+        super().__init__(upstream, name="StripProcessor")
 
         self._spec: RasterScanStitchedAcquisitionSpec | LineCameraStitchedAcquisitionSpec
         self._acquisition: RasterScanStitchedAcquisition | LineCameraStitchedAcquisition
@@ -276,13 +247,11 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
 class StripStitcher(Processor[StripProcessor]):
     """
     Blends edges of consecutive strips. 
-    
-    Note that this works in-place on the strip data (not copied).
     """
     INTENSITY_THRESH = 200
 
     def __init__(self, upstream: StripProcessor):
-        super().__init__(upstream)
+        super().__init__(upstream, name="StripStitcher")
         self._data_range = upstream.data_range
 
         self._spec: RasterScanStitchedAcquisitionSpec | LineCameraStitchedAcquisitionSpec
@@ -312,7 +281,10 @@ class StripStitcher(Processor[StripProcessor]):
                     if in_strip.indices[1] == 0:
                         stitched_strip.data[...] = in_strip.data
                         stitched_strip.indices = tuple(in_strip.indices)
-                        # we need one more strip to start blending
+                        
+                        if self.n_strips == 1:
+                            self._publish(stitched_strip)
+
                         continue
 
                     a, b = stitched_strip.data, in_strip.data
@@ -372,11 +344,6 @@ class StripStitcher(Processor[StripProcessor]):
                         prev_correction = 1
 
         except EndOfStream:
-            # if prev_strip:
-            #     with prev_strip: # type: ignore
-            #         print(f"Republishing strip {prev_strip.indices}")
-            #         self._publish(prev_strip)
-
             self._publish(None)
 
     @property
@@ -415,10 +382,20 @@ class TileBuilder(Processor[StripStitcher]):
     """Parcels up tiles to send to file writer."""
     Product = TileProduct
 
-    def __init__(self, upstream: StripStitcher, tile_shape=(512,512)):
-        super().__init__(upstream)
+    def __init__(self, 
+                 upstream: StripStitcher, 
+                 tile_shape=(512,512)):
+        super().__init__(upstream, name="TileBuilder")
         self._acquisition: RasterScanStitchedAcquisition | LineCameraStitchedAcquisition
         self._spec: RasterScanStitchedAcquisitionSpec | LineCameraStitchedAcquisitionSpec
+        
+        if isinstance(self._acquisition.runtime_info, LineAcquisitionRuntimeInfo):
+            scan_axis = self._acquisition.system_config.fast_raster_scanner['axis']
+        elif isinstance(self._acquisition.runtime_info, CameraAcquisitionRuntimeInfo):
+            scan_axis = self._acquisition.system_config.line_camera['axis']
+        else:
+            raise RuntimeError(f"Acquistion runtime_info is unexpected type: "
+                               f"{type(self._acquisition.runtime_info)}")
 
         if tile_shape[0] != tile_shape[1]:
             raise ValueError("Tile shape must be square")
@@ -435,7 +412,7 @@ class TileBuilder(Processor[StripStitcher]):
 
         self._n_strips = upstream.n_strips
 
-        if self._acquisition.system_config.fast_raster_scanner['axis'] == 'x':
+        if scan_axis == 'x':
             self.n_pixels_scan = round(self._spec.x_range.range / self._spec.pixel_size)
             self.n_pixels_web  = round(self._spec.y_range.range / self._spec.pixel_size)
         else:
@@ -580,7 +557,7 @@ class StitchedPreview(Processor):
                  downsample: int = 16,
                  show_progress: bool = True,
                  **kwargs):
-        super().__init__(upstream, **kwargs)
+        super().__init__(upstream, name="StitchedPreview", **kwargs)
         self._hold = True # effectively holds off starting run loop until a subscriber is added
         self._acquisition: RasterScanStitchedAcquisition
         self._data_range = upstream.data_range

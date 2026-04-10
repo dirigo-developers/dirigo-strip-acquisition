@@ -13,15 +13,31 @@ strip_processor = diri.make_processor(
     name        = "strip", 
     upstream    = line_processor
 )
+strip_stitcher = diri.make_processor(
+    name        = "strip_stitcher",
+    upstream    = strip_processor
+)
+tile_builder    = diri.make_processor(
+    name        = "tile_builder", # type: ignore
+    upstream    = strip_stitcher
+)
+stitch_preview  = diri.make_processor(
+    name          = "stitch_preview",
+    upstream      = tile_builder,
+    downsample    = 1, # type: ignore
+    show_progress = False # type: ignore
+)
+
+
 disp_processor  = diri.make_display_processor(
     name            = "frame",
-    upstream        = strip_processor, 
+    upstream        = stitch_preview, 
     pixel_format    = DisplayPixelFormat.RGB24
 )
 disp_processor.display_channels[0].display_min = 0
 disp_processor.display_channels[0].display_max = 32000
 
-writer          = diri.make_writer("tiff", upstream=disp_processor)
+writer = diri.make_writer("tiff", upstream=disp_processor)
 
 
 acquisition.start()
