@@ -3,6 +3,7 @@ from dirigo.sw_interfaces.display import DisplayPixelFormat
 
 
 diri = Dirigo()
+s = diri.hw.stages
     
 acquisition     = diri.make_acquisition("line_camera_stitched", spec="line_camera")
 line_processor  = diri.make_processor(
@@ -27,7 +28,6 @@ stitch_preview  = diri.make_processor(
     downsample    = 1, # type: ignore
     show_progress = False # type: ignore
 )
-
 
 disp_processor  = diri.make_display_processor(
     name            = "frame",

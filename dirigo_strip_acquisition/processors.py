@@ -574,8 +574,8 @@ class StitchedPreview(Processor):
             self._acquisition.final_shape[2] / upstream.product_shape[0]
         )
         self._z_levels = self._acquisition.final_shape[0]
-        preview_shape = (self._tiles_scan * self._downsampled_tile_length, 
-                         self._tiles_web  * self._downsampled_tile_length,
+        preview_shape = (self._acquisition.final_shape[1] // self._downsample, 
+                         self._acquisition.final_shape[2] // self._downsample,
                          self._acquisition.final_shape[3]) # the preview does not have a Z dimension
 
         self._init_product_pool(
@@ -604,11 +604,11 @@ class StitchedPreview(Processor):
                             #print(f"Tile's indices {tile.coords}, Our indices {tz,ts,tw}")
                             i0 = ts * self._downsampled_tile_length
                             j0 = tw * self._downsampled_tile_length
-                            i1 = i0 + self._downsampled_tile_length
-                            j1 = j0 + self._downsampled_tile_length
+                            i1 = min(i0 + self._downsampled_tile_length, self.product_shape[0])
+                            j1 = min(j0 + self._downsampled_tile_length, self.product_shape[1])
                             # downsample and place in array
                             preview.data[i0:i1, j0:j1, :] = \
-                                downsample_kernel(tile.data, self._downsample)
+                                downsample_kernel(tile.data, self._downsample)[:(i1-i0), :(j1-j0), :]
 
                     if self._show_progress:
                         self._publish(preview)
@@ -624,7 +624,8 @@ class StitchedPreview(Processor):
     def add_subscriber(self, subscriber: Worker):
         """Adds the subscriber and publishes a blank product."""
         super().add_subscriber(subscriber)
-        self._publish(self._get_free_product())
+        if self._show_progress:
+            self._publish(self._get_free_product())
         self._hold = False
 
     @property
