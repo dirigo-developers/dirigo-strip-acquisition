@@ -590,8 +590,18 @@ class RectangularFieldStagePositionHelper:
 
     def scan_center(self, strip_index: int) -> units.Position:
         """Return the center position (along scan dimension) for `strip_index`"""
-        effective_line_width = self._line_width * (1 - self._spec.strip_overlap) # reduced by the overlap
-        relative_position = strip_index * effective_line_width + self._line_width / 2
+        # check strip index
+        if not 0 <= strip_index < self.n_strips:
+            raise ValueError(f"Requested strip index: {strip_index}, outside bounds: 0 to {self.n_strips-1}")
+        
+        if self.n_strips > 1:
+            effective_line_width = self._line_width * (1 - self._spec.strip_overlap) # reduced by the overlap
+            relative_position = strip_index * effective_line_width + self._line_width / 2
+        else:
+            if self._scan_axis == "x":
+                relative_position = self._spec.x_range.range / 2
+            else:
+                relative_position = self._spec.y_range.range / 2
 
         if self._scan_axis == "x":
             return units.Position(self._spec.x_range.min + relative_position)
