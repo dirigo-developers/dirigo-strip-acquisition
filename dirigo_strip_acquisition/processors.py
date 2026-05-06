@@ -99,8 +99,12 @@ def _resample_strip_nearest_kernel(
 
 class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be used with a LineCamera Processor (not limited to raster)
     """Receives position-encoded line data and places lines into strip."""
-    def __init__(self, upstream: RasterFrameProcessor):
+    def __init__(self, 
+                 upstream: RasterFrameProcessor,
+                 channel_shear: np.ndarray | None = None):
+        
         super().__init__(upstream, name="StripProcessor")
+        
 
         self._spec: RasterScanStitchedAcquisitionSpec | LineCameraStitchedAcquisitionSpec
         self._acquisition: RasterScanStitchedAcquisition | LineCameraStitchedAcquisition
@@ -129,11 +133,20 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
         else:
             n_pixels_web = round(self._spec.x_range.range / self._spec.pixel_size)
 
+        n_channels = self._acquisition.runtime_info.n_channels
         self._strip_shape = ( # strips are assembled in dim order: (web, scan, chan)
             n_pixels_web,
             self._spec.pixels_per_line,
-            self._acquisition.runtime_info.n_channels
+            n_channels
         )
+        if channel_shear is None:
+            self._forward_shear = np.zeros(shape=(n_channels,), dtype=np.int64)
+            self._reverse_shear = np.zeros(shape=(n_channels,), dtype=np.int64)
+        else:
+            if not isinstance(channel_shear, np.ndarray) or channel_shear.shape != (2, n_channels):
+                raise ValueError("`channel_shear` must be a numpy array")
+            self._forward_shear = channel_shear[0,:].astype(np.int64)
+            self._reverse_shear = channel_shear[1,:].astype(np.int64)
 
         self._init_product_pool(
             n =     2, 
@@ -145,19 +158,12 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
         return super()._receive_product() # type: ignore
     
     def _work(self):
-        if self._positioner.n_strips > 1:
-            scan_transl = self._positioner.scan_center(1) - self._positioner.scan_center(0)
-        else:
-            scan_transl = 0.0
-
-        # To handle bilinear sensor scan direction
-        no_shear = np.array([0, 0, 0], dtype=np.int64)
-        rb_shear = np.array([2, 0, 2], dtype=np.int64)
+        scan_trans_thresh = 0.25 * self._spec.line_width
         
         try:
             for z_index in range(self._spec.z_steps):
                 for strip_index in range(self._positioner.n_strips):
-                    moving = False
+                    moving = False # flag to track whether the strip's initial move has begun
 
                     line_blocks: list[np.ndarray] = []
                     position_blocks: list[np.ndarray] = []
@@ -167,11 +173,6 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
                     web_length = web_max - web_min
                     scan_center = self._positioner.scan_center(strip_index) 
                     strip_center_min = np.array([[web_min, scan_center]])
-
-                    if strip_index % 2 == 0:
-                        channel_row_offsets = no_shear
-                    else:
-                        channel_row_offsets = rb_shear
                 
                     while True:
                         with self._receive_product() as frame:
@@ -189,7 +190,7 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
                             # TODO, would ascending/monotonic be better condition for 'web valid'?
 
                             if self._positioner.n_strips > 1:
-                                scan_valid = (strip_positions[:, 1] > 0.5) & (strip_positions[:, 1] < 0.5)
+                                scan_valid = (strip_positions[:, 1] > -scan_trans_thresh) & (strip_positions[:, 1] < scan_trans_thresh)
                             else:
                                 scan_valid = np.ones(shape=(len(positions),), dtype=np.bool_)
 
@@ -208,7 +209,6 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
                         position_blocks=position_blocks,
                         z_index=z_index,
                         strip_index=strip_index,
-                        channel_row_offsets=channel_row_offsets,
                     )
 
         except EndOfStream:
@@ -217,7 +217,6 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
                 position_blocks=position_blocks,
                 z_index=z_index,
                 strip_index=strip_index,
-                channel_row_offsets=channel_row_offsets,
             )
 
         finally:
@@ -228,8 +227,7 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
         line_blocks: list[np.ndarray],
         position_blocks: list[np.ndarray],
         z_index: int,
-        strip_index: int,
-        channel_row_offsets: np.ndarray):
+        strip_index: int):
 
         lines = np.concatenate(line_blocks, axis=0)
         strip_positions = np.concatenate(position_blocks, axis=0)
@@ -251,7 +249,7 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
             lines=lines,
             source_web_px=source_web_px,
             source_scan_px=source_scan_px,
-            channel_row_offsets=channel_row_offsets,
+            channel_row_offsets=self.channel_shear(strip_index),
             max_web_distance_px=1.25,
         )
 
@@ -262,6 +260,15 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
     @property
     def data_range(self) -> units.IntRange:
         return self._data_range
+    
+    def channel_shear(self, strip_index: int) -> np.ndarray:
+        """Given the strip index, selects the appropriate channel shearing vector"""
+        if (strip_index % 2) == 0:
+            # Forward / even strips
+            return self._forward_shear
+        else:
+            # Reverse / odd strips
+            return self._reverse_shear
     
 
 
