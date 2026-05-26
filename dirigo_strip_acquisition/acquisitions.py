@@ -566,6 +566,10 @@ class LineCameraStitchedAcquisition(StitchedAcquisition):
         self._strip_acquisition: LineCameraStripAcquisition
         return self._strip_acquisition.camera_profile
     
+    @classmethod
+    def get_specification(cls, spec_name: str = "default") -> LineCameraStitchedAcquisitionSpec:
+        return super().get_specification(spec_name)
+    
 
 # ---------- Helpers ----------
 class RectangularFieldStagePositionHelper:

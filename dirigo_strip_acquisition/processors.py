@@ -26,66 +26,54 @@ int64_1d_readonly = types.Array(types.int64, 1, "C", readonly=True)
 sig_resample = [
     void(
         types.int16[:, :, :],       # strip
+        types.int64,                # strip_index
+        types.int64,                # nlines_copied
         int16_3d_readonly,          # lines
         float64_1d_readonly,        # source_web_px, sorted ascending
         float64_1d_readonly,        # source_scan_px, same order
-        int64_1d_readonly,          # channel_row_offsets
-        types.float64,              # max_web_distance_px
+        int64_1d_readonly           # channel_row_offsets
     )
 ]
-
-
-@njit(cache=True)
-def _nearest_sorted_index(x: np.ndarray, target: float) -> int:
-    """Return nearest index in monotonically increasing x."""
-    n = x.shape[0]
-
-    if n == 0:
-        return -1
-
-    if target <= x[0]:
-        return 0
-
-    if target >= x[n - 1]:
-        return n - 1
-
-    lo = 0
-    hi = n - 1
-
-    while hi - lo > 1:
-        mid = (lo + hi) // 2
-        if x[mid] < target:
-            lo = mid
-        else:
-            hi = mid
-
-    if abs(x[lo] - target) <= abs(x[hi] - target):
-        return lo
-    else:
-        return hi
 
 
 @njit(sig_resample, parallel=True, fastmath=True, cache=True)
 def _resample_strip_nearest_kernel(
     strip: np.ndarray,                 # (web, scan, chan)
+    strip_index: int,
+    nlines_copied: int,
     lines: np.ndarray,                 # (line_idx, scan, chan), sorted by web position
     source_web_px: np.ndarray,         # line_idx -> web position in pixels
     source_scan_px: np.ndarray,        # line_idx -> scan shift in pixels
-    channel_row_offsets: np.ndarray,   # chan -> row offset in pixels
-    max_web_distance_px: float):
+    channel_row_offsets: np.ndarray):  # chan -> row offset in pixels
 
     n_height, n_width, n_chan = strip.shape
 
+    # Compute interpolation source indices (this can't be done parallel)
+    src_indices = np.zeros((n_height,), np.int64)
+
+    if strip_index % 2 == 0:
+        # Forward strips
+        i = 0
+        for trgt_row in range(n_height):
+            while abs(source_web_px[i+1]-trgt_row) < abs(source_web_px[i]-trgt_row):
+                i += 1
+            src_indices[trgt_row] = i
+    else:
+        # Reverse strips
+        i = nlines_copied-1
+        for trgt_row in range(n_height):
+            while abs(source_web_px[i-1]-trgt_row) < abs(source_web_px[i]-trgt_row):
+                i -= 1
+            src_indices[trgt_row] = i
+
+    # Perform NN interpolation
     for dst_row in prange(n_height):
         for ch in range(n_chan):
             target_web_px = dst_row - channel_row_offsets[ch]
 
-            src_idx = _nearest_sorted_index(source_web_px, target_web_px)
+            src_idx = src_indices[target_web_px]
 
             if src_idx < 0:
-                continue
-
-            if abs(source_web_px[src_idx] - target_web_px) > max_web_distance_px:
                 continue
 
             scan_shift = int(round(source_scan_px[src_idx]))
@@ -105,7 +93,6 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
         
         super().__init__(upstream, name="StripProcessor")
         
-
         self._spec: RasterScanStitchedAcquisitionSpec | LineCameraStitchedAcquisitionSpec
         self._acquisition: RasterScanStitchedAcquisition | LineCameraStitchedAcquisition
         if isinstance(self._spec, RasterScanStitchedAcquisitionSpec):
@@ -123,10 +110,6 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
             line_width  = self._spec.line_width, # TODO, remove line_width since it's already in spec
             spec        = self._spec
         )
-
-        # positions are stored in order (web, scan)
-        prev_position = (self._positioner.web_min(0), self._positioner.scan_center(0))
-        self._prev_position = np.array(prev_position, dtype=np.float64)
 
         if self._scan_axis_label == "x":
             n_pixels_web = round(self._spec.y_range.range / self._spec.pixel_size)
@@ -153,6 +136,12 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
             shape = self._strip_shape, 
             dtype = np.int16
         )
+
+        # Make large buffer to contain incoming line data
+        # TODO allocate smarter, currently it's just 2X the strip web length
+        buffer_shape = (2*self._strip_shape[0], self._strip_shape[1], self._strip_shape[2])
+        self._buffer = np.empty(shape=buffer_shape, dtype=np.int16)
+        self._positions = np.empty(shape=(2*self._strip_shape[0], 2), dtype=np.float64)
         
     def _receive_product(self) -> ProcessorProduct:
         return super()._receive_product() # type: ignore
@@ -163,10 +152,7 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
         try:
             for z_index in range(self._spec.z_steps):
                 for strip_index in range(self._positioner.n_strips):
-                    moving = False # flag to track whether the strip's initial move has begun
-
-                    line_blocks: list[np.ndarray] = []
-                    position_blocks: list[np.ndarray] = []
+                    self._nlines_copied = 0
 
                     web_min = self._positioner.web_min(strip_index)
                     web_max = self._positioner.web_max(strip_index)
@@ -183,9 +169,6 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
                                 positions = np.array(frame.positions)
                             strip_positions = positions - strip_center_min # relative positions
 
-                            if (moving == False) and (strip_positions[-1, 1] > 0):
-                                moving = True
-
                             web_valid = (strip_positions[:, 0] >= 0) & (strip_positions[:, 0] <= web_length)
                             # TODO, would ascending/monotonic be better condition for 'web valid'?
 
@@ -194,63 +177,45 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
                             else:
                                 scan_valid = np.ones(shape=(len(positions),), dtype=np.bool_)
 
-                            # Store copies (TODO replace with big buffer)
                             valid = web_valid & scan_valid
-                            line_blocks.append(frame.data[valid].copy())
-                            position_blocks.append(strip_positions[valid].copy()) 
+                            nvalid = int(sum(valid))
 
-                            # TODO store carry over lines (NOT valid)   
+                            nlc = self._nlines_copied # for brevity below
+                            self._buffer[nlc:(nlc+nvalid),:,:] = frame.data[valid]
+                            self._positions[nlc:(nlc+nvalid),:] = strip_positions[valid]
+                            self._nlines_copied += nvalid
 
-                            if (moving == True) and (not valid[-1]):
+                            # TODO store carry over lines for next strip
+
+                            if (self._nlines_copied > 0) and (not valid[-1]):
                                 break # break out of while loop
 
-                    self._flush_strip(
-                        line_blocks=line_blocks,
-                        position_blocks=position_blocks,
-                        z_index=z_index,
-                        strip_index=strip_index,
-                    )
+                    self._flush_strip(z_index, strip_index)
 
         except EndOfStream:
-            self._flush_strip(
-                line_blocks=line_blocks,
-                position_blocks=position_blocks,
-                z_index=z_index,
-                strip_index=strip_index,
-            )
+            self._flush_strip(z_index, strip_index)
 
         finally:
             self._publish(None)
 
-    def _flush_strip(
-        self,
-        line_blocks: list[np.ndarray],
-        position_blocks: list[np.ndarray],
-        z_index: int,
-        strip_index: int):
+    def _flush_strip(self, z_index: int, strip_index: int):
 
-        lines = np.concatenate(line_blocks, axis=0)
-        strip_positions = np.concatenate(position_blocks, axis=0)
-
-        source_web_px = strip_positions[:, 0] / self._spec.pixel_size
-        source_scan_px = strip_positions[:, 1] / self._spec.pixel_size
-
-        # kernel assumes monotonic ascending source_web_px (TODO, eliminate this by adding to big buffer in worker)
-        order = np.argsort(source_web_px)
-        lines = np.ascontiguousarray(lines[order])
-        source_web_px = np.ascontiguousarray(source_web_px[order])
-        source_scan_px = np.ascontiguousarray(source_scan_px[order])
+        source_web_px = self._positions[:, 0] / self._spec.pixel_size
+        source_scan_px = self._positions[:, 1] / self._spec.pixel_size
 
         strip = self._get_free_product()
-        strip.data[...] = 0
+        strip.data[...] = 0 # TODO, is this needed with new resampling strategy?
+
+        print(self._nlines_copied)
 
         _resample_strip_nearest_kernel(
-            strip=strip.data,
-            lines=lines,
-            source_web_px=source_web_px,
-            source_scan_px=source_scan_px,
-            channel_row_offsets=self.channel_shear(strip_index),
-            max_web_distance_px=1.25,
+            strip               = strip.data, # final strip data
+            strip_index         = strip_index,
+            nlines_copied       = self._nlines_copied,
+            lines               = self._buffer,
+            source_web_px       = source_web_px,
+            source_scan_px      = source_scan_px,
+            channel_row_offsets = self.channel_shear(strip_index),
         )
 
         strip.indices = (z_index, strip_index)
