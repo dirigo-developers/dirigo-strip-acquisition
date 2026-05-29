@@ -244,6 +244,8 @@ class StitchedAcquisition(Acquisition, ABC):
         super().__init__(hw, system_config, spec)
         self.spec: RasterScanStitchedAcquisitionSpec | LineCameraStitchedAcquisitionSpec # to refine type hints
 
+        self.return_to_original_position = False # Flag to send stages back to where they started
+
         # set up internal strip acquisition (takes about 0.9 s)        
         self._strip_acquisition = self.setup_strip_acquisition()
         self._strip_acquisition.spec.buffers_per_acquisition = -1 # codes for unlimited buffers
@@ -277,6 +279,7 @@ class StitchedAcquisition(Acquisition, ABC):
             n_pixels_web  = round(self.spec.x_range.range / self._strip_acquisition.spec.pixel_size)
 
         # non-blocking move to initial start position, since this takes time
+        # TODO revise this, since actual stage movement during Worker instantiation is unintuitive
         self._original_position = (
             self.hw.stages.x.position, 
             self.hw.stages.y.position,
@@ -313,7 +316,6 @@ class StitchedAcquisition(Acquisition, ABC):
 
     def _work(self):
         
-        #time.sleep(0.050) # to make certain the stages have started moving
         self._scan_axis_stage.wait_until_move_finished()
         self._web_axis_stage.wait_until_move_finished()
 
@@ -351,9 +353,10 @@ class StitchedAcquisition(Acquisition, ABC):
             self.hw.stages.x.wait_until_move_finished()
             self.hw.stages.y.wait_until_move_finished()
             self._web_axis_stage.max_velocity = self._original_web_velocity
-            self.hw.stages.x.move_to(self._original_position[0])
-            self.hw.stages.y.move_to(self._original_position[1])
-            self.hw.objective_z_scanner.move_to(self._original_position[2])
+            if self.return_to_original_position:
+                self.hw.stages.x.move_to(self._original_position[0])
+                self.hw.stages.y.move_to(self._original_position[1])
+                self.hw.objective_z_scanner.move_to(self._original_position[2])
 
     def _strip_loop(self):
         web_margin = 2 *self.spec.pixel_size # should this just be built into the PositionHelper?
