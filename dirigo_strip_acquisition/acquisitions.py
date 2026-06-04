@@ -342,7 +342,7 @@ class StitchedAcquisition(Acquisition, ABC):
 
         finally:
             # Stop the line acquisition Worker
-            self._strip_acquisition.stop()
+            self._strip_acquisition.stop(drain=True)
 
             if self.hw.stages.x.moving:
                 self.hw.stages.x.stop()
