@@ -148,8 +148,8 @@ class LineCameraStripAcquisition(LineCameraLineAcquisition):
 
         self._n_positions_read = 0
 
-        w = ("x" if self.hw.line_camera.axis == "y" else "y") +  "_config"
-        sample_clock_channel = self.system_config.encoders[w]["trigger_channel"]
+        w = ("x" if self.hw.line_camera.axis == "y" else "y") +  "_config" # TODO clean this up: should there be alternate encoders (with separate sample clock) for line camera?
+        sample_clock_channel = self.system_config.encoders[w]["sample_clock_channel_alt"]
         self.hw.encoders.x.sample_clock_channel = sample_clock_channel
         self.hw.encoders.y.sample_clock_channel = sample_clock_channel
 
