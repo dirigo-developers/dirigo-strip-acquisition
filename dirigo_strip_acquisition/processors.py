@@ -302,7 +302,7 @@ class StripStitcher(Processor[StripProcessor]):
                     ]
 
                     correction = np.linspace(prev_correction, a_correction, a.shape[1])
-                    a[...] = (a * correction[None,:,:]).astype(np.int16)
+                    a[...] = self._to_int16(a * correction[None,:,:])
 
                     prev_correction = b_correction
 
@@ -314,7 +314,7 @@ class StripStitcher(Processor[StripProcessor]):
                         strip_a_end     = a[:, -w:, :].astype(np.float32)
                         strip_b_start   = b[:, :w,  :].astype(np.float32) * b_correction
 
-                        blended = ((1-alpha)*strip_a_end + alpha*strip_b_start).astype(np.int16)
+                        blended = self._to_int16((1-alpha)*strip_a_end + alpha*strip_b_start)
 
                         a[:, -w:, :] = blended  # only correct A since B (edge) will not be used for tiles
                     
@@ -327,7 +327,7 @@ class StripStitcher(Processor[StripProcessor]):
                     if in_strip.indices[1] == self.n_strips - 1:
                         # on last strip of the z opt. section, publish last strip
                         correction = np.linspace(prev_correction, 1, b.shape[1])
-                        stitched_strip.data[...] = (b * correction[None,:,:]).astype(np.int16)
+                        stitched_strip.data[...] = self._to_int16(b * correction[None,:,:])
 
                         print(f"Publishing stitched strip {in_strip.indices}")
                         self._publish(stitched_strip)
@@ -341,6 +341,9 @@ class StripStitcher(Processor[StripProcessor]):
     @property
     def data_range(self) -> units.IntRange:
         return self._data_range
+
+    def _to_int16(self, a):
+        return np.clip(a, self._data_range.min, self._data_range.max).astype(np.int16)
 
 
 @njit(parallel=True, fastmath=True, nogil=True, cache=True)
