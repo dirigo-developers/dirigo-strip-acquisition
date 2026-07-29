@@ -245,6 +245,8 @@ class StitchedAcquisition(Acquisition, ABC):
         self.spec: RasterScanStitchedAcquisitionSpec | LineCameraStitchedAcquisitionSpec # to refine type hints
 
         self.return_to_original_position = False # Flag to send stages back to where they started
+        self._original_web_velocity: units.Velocity | None = None
+        self._original_scan_velocity: units.Velocity | None = None
 
         # set up internal strip acquisition (takes about 0.9 s)        
         self._strip_acquisition = self.setup_strip_acquisition()
@@ -290,7 +292,7 @@ class StitchedAcquisition(Acquisition, ABC):
             self.positioner.scan_center(strip_index=0)
         )
         self._web_axis_stage.move_to(
-            self.positioner.web_limits.min - self.spec.pixel_size # a bit extra movement to be sure we trigger enough samples
+            self.positioner.web_min(strip_index=0) - 4 * self.spec.pixel_size # a bit extra movement to be sure we trigger enough samples
         )
 
         self._final_shape = (self.spec.z_steps, n_pixels_scan, n_pixels_web, n_channels) 
@@ -329,6 +331,7 @@ class StitchedAcquisition(Acquisition, ABC):
         self._web_axis_stage.acceleration = units.Acceleration("200 mm/s^2")
 
         # set scan velo/accel
+        self._original_scan_velocity = self._scan_axis_stage.max_velocity
         self._scan_axis_stage.max_velocity = 2 * self._web_velocity
         self._scan_axis_stage.acceleration = units.Acceleration("200 mm/s^2")
 
@@ -352,14 +355,17 @@ class StitchedAcquisition(Acquisition, ABC):
             # Return to original position
             self.hw.stages.x.wait_until_move_finished()
             self.hw.stages.y.wait_until_move_finished()
+
             self._web_axis_stage.max_velocity = self._original_web_velocity
+            self._scan_axis_stage.max_velocity = self._original_scan_velocity
+
             if self.return_to_original_position:
                 self.hw.stages.x.move_to(self._original_position[0])
                 self.hw.stages.y.move_to(self._original_position[1])
                 self.hw.objective_z_scanner.move_to(self._original_position[2])
 
     def _strip_loop(self):
-        web_margin = 2 *self.spec.pixel_size # should this just be built into the PositionHelper?
+        web_margin = 4 * self.spec.pixel_size # should this just be built into the PositionHelper?
         sleep_time = 0.010
 
         odd_strip_end = self.positioner.web_limits.min - web_margin
@@ -523,6 +529,10 @@ class RasterScanStitchedAcquisition(StitchedAcquisition):
     def digitizer_profile(self):
         self._strip_acquisition: RasterScanStripAcquisition
         return self._strip_acquisition.digitizer_profile
+
+    @classmethod
+    def get_specification(cls, spec_name: str = "default") -> RasterScanStitchedAcquisitionSpec:
+        return super().get_specification(spec_name)
 
 
 class LineCameraStitchedAcquisitionSpec(StitchedAcquisitionSpec, LineCameraStripAcquisitionSpec):

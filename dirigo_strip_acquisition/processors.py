@@ -59,11 +59,10 @@ def _resample_strip_nearest_kernel(
                 i += 1
             src_indices[trgt_row] = i
     else:
-        # Reverse strips
-        i = nlines_copied-1
-        for trgt_row in range(n_height):
-            while abs(source_web_px[i-1]-trgt_row) < abs(source_web_px[i]-trgt_row):
-                i -= 1
+        i = 0
+        for trgt_row in range(n_height-1, -1, -1): # fill backwards
+            while abs(source_web_px[i+1]-trgt_row) < abs(source_web_px[i]-trgt_row):
+                i += 1
             src_indices[trgt_row] = i
 
     # Perform NN interpolation
@@ -100,7 +99,7 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
             axis_error = self._acquisition.runtime_info.stage_scanner_angle
         else:
             self._scan_axis_label = self._acquisition.system_config.line_camera['axis']
-            axis_error = units.Angle(0) # TODO fix this for more precise micro-macro positioning
+            axis_error = self._acquisition.runtime_info.stage_camera_angle
 
         self._system_config = self._acquisition.system_config
         self._data_range = upstream.data_range
@@ -140,8 +139,8 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
         # Make large buffer to contain incoming line data
         # TODO allocate smarter, currently it's just 2X the strip web length
         buffer_shape = (2*self._strip_shape[0], self._strip_shape[1], self._strip_shape[2])
-        self._buffer = np.empty(shape=buffer_shape, dtype=np.int16)
-        self._positions = np.empty(shape=(2*self._strip_shape[0], 2), dtype=np.float64)
+        self._buffer = np.zeros(shape=buffer_shape, dtype=np.int16)
+        self._positions = np.zeros(shape=(2*self._strip_shape[0], 2), dtype=np.float64)
         
     def _receive_product(self) -> ProcessorProduct:
         return super()._receive_product() # type: ignore
@@ -181,6 +180,8 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
                             nvalid = int(sum(valid))
 
                             nlc = self._nlines_copied # for brevity below
+                            if nlc+nvalid > self._buffer.shape[0]:
+                                print("problem")
                             self._buffer[nlc:(nlc+nvalid),:,:] = frame.data[valid]
                             self._positions[nlc:(nlc+nvalid),:] = strip_positions[valid]
                             self._nlines_copied += nvalid
@@ -206,8 +207,6 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
         strip = self._get_free_product()
         strip.data[...] = 0 # TODO, is this needed with new resampling strategy?
 
-        print(self._nlines_copied)
-
         _resample_strip_nearest_kernel(
             strip               = strip.data, # final strip data
             strip_index         = strip_index,
@@ -219,7 +218,7 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
         )
 
         strip.indices = (z_index, strip_index)
-        print(f"Publishing strip with indices {strip.indices}")
+        print(f"Publishing strip with indices {strip.indices} (n lines copied: {self._nlines_copied})")
         self._publish(strip)
     
     @property
@@ -495,7 +494,6 @@ class TileBuilder(Processor[StripStitcher]):
                         
                         _transpose_inplace(tile.data) # go from strips in dimensions (web, scan, chan) to tiles in (scan, web, chan)
 
-                        #print(f"Publishing tile {t_z,t_s,t_w}")
                         self._publish(tile)
                         tile_idx += 1
 
@@ -551,7 +549,6 @@ class StitchedPreview(Processor):
                  show_progress: bool = True,
                  **kwargs):
         super().__init__(upstream, name="StitchedPreview", **kwargs)
-        self._hold = True # effectively holds off starting run loop until a subscriber is added
         self._acquisition: RasterScanStitchedAcquisition
         self._data_range = upstream.data_range
         self._downsample = downsample
@@ -581,10 +578,11 @@ class StitchedPreview(Processor):
         return super()._receive_product() # type: ignore
     
     def _work(self):
-        while self._hold:
-            # trick to avoid deadlock: getting stuck at _receive_product()
-            time.sleep(0.05)
-        
+        if self._show_progress:
+            # Hold until blank is published
+            while self._n_published == 0:
+                time.sleep(0.05)
+
         preview = self._get_free_product()
 
         try:
@@ -594,7 +592,6 @@ class StitchedPreview(Processor):
                     for tw in range(self._tiles_web):
 
                         with self._receive_product() as tile:
-                            #print(f"Tile's indices {tile.coords}, Our indices {tz,ts,tw}")
                             i0 = ts * self._downsampled_tile_length
                             j0 = tw * self._downsampled_tile_length
                             i1 = min(i0 + self._downsampled_tile_length, self.product_shape[0])
@@ -612,14 +609,10 @@ class StitchedPreview(Processor):
             self._publish(None) # forward sentinel None
 
         except EndOfStream:
-            self._publish(None) # forward sentinel None
-
-    def add_subscriber(self, subscriber: Worker):
-        """Adds the subscriber and publishes a blank product."""
-        super().add_subscriber(subscriber)
-        if self._show_progress:
-            self._publish(self._get_free_product())
-        self._hold = False
+            self._publish(None) # forward sentinel None        
+    
+    def publish_blank(self):
+        self._publish(self._get_free_product())
 
     @property
     def data_range(self) -> units.IntRange:
