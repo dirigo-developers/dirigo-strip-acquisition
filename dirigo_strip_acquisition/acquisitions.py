@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from functools import cached_property
 from pathlib import Path
 import math, time
+import threading
 
 import numpy as np
 
@@ -62,10 +63,14 @@ class RasterScanStripAcquisition(LineAcquisition):
             = self.system_config.encoders['y_config']["sample_clock_channel"]
 
         self._n_positions_read = 0
+        self._strip_index_lock = threading.Lock()
+        self._depth_index = None
+        self._strip_index = None
+        
 
     @property
     def axis(self) -> str:
-        return self.hw.fast_raster_scanner.axis
+        return self.hw.fast_raster_scanner.axis 
     
     @property
     def line_rate(self) -> units.Frequency:
@@ -73,6 +78,11 @@ class RasterScanStripAcquisition(LineAcquisition):
             return 2 * self.hw.fast_raster_scanner.frequency
         else:
             return self.hw.fast_raster_scanner.frequency
+
+    def set_strip_index(self, depth_index: int, strip_index: int) -> None:
+        with self._strip_index_lock:
+            self._depth_index = int(depth_index)
+            self._strip_index = int(strip_index) 
 
     def _work(self):
         """
@@ -103,7 +113,6 @@ class RasterScanStripAcquisition(LineAcquisition):
 
             self.hw.encoders.stop()
 
-
     def read_positions(self):
         """Override provides sample positions from linear position encoders."""  # TODO: order dimensions scan, web?
         if self.spec.bidirectional_scanning and self._n_positions_read == 0:
@@ -128,6 +137,13 @@ class RasterScanStripAcquisition(LineAcquisition):
 
         return positions
 
+    def _publish(self, obj: AcquisitionProduct | None):
+        if obj is not None:
+            with self._strip_index_lock:
+                obj.depth_index = self._depth_index
+                obj.strip_index = self._strip_index
+        return super()._publish(obj)
+
 
 class LineCameraStripAcquisitionSpec(LineCameraLineAcquisitionSpec):
     """Alias of LineCameraLineAcquisitionSpec"""
@@ -147,6 +163,9 @@ class LineCameraStripAcquisition(LineCameraLineAcquisition):
         self.spec: LineCameraLineAcquisitionSpec
 
         self._n_positions_read = 0
+        self._strip_index_lock = threading.Lock()
+        self._depth_index = None
+        self._strip_index = None
 
         w = ("x" if self.hw.line_camera.axis == "y" else "y") +  "_config" # TODO clean this up: should there be alternate encoders (with separate sample clock) for line camera?
         sample_clock_channel = self.system_config.encoders[w]["sample_clock_channel_alt"]
@@ -155,6 +174,11 @@ class LineCameraStripAcquisition(LineCameraLineAcquisition):
 
     # property: axis defined in super class
     # property: line_rate defined in super class
+
+    def set_strip_index(self, depth_index: int, strip_index: int) -> None:
+        with self._strip_index_lock:
+            self._depth_index = int(depth_index)
+            self._strip_index = int(strip_index) 
 
     def _work(self):
         """
@@ -182,6 +206,13 @@ class LineCameraStripAcquisition(LineCameraLineAcquisition):
         positions = self.hw.encoders.read_positions(self.spec.lines_per_buffer)         
         self._n_positions_read += self.spec.lines_per_buffer
         return positions
+
+    def _publish(self, obj: AcquisitionProduct | None):
+        if obj is not None:
+            with self._strip_index_lock:
+                obj.depth_index = self._depth_index
+                obj.strip_index = self._strip_index
+        return super()._publish(obj)
 
 
 
@@ -292,7 +323,7 @@ class StitchedAcquisition(Acquisition, ABC):
             self.positioner.scan_center(strip_index=0)
         )
         self._web_axis_stage.move_to(
-            self.positioner.web_min(strip_index=0) - 4 * self.spec.pixel_size # a bit extra movement to be sure we trigger enough samples
+            self.positioner.web_min(strip_index=0) - 5 * self.spec.pixel_size # a bit extra movement to be sure we trigger enough samples
         )
 
         self._final_shape = (self.spec.z_steps, n_pixels_scan, n_pixels_web, n_channels) 
@@ -328,12 +359,12 @@ class StitchedAcquisition(Acquisition, ABC):
         # set web velo/accel
         self._original_web_velocity = self._web_axis_stage.max_velocity
         self._web_axis_stage.max_velocity = self._web_velocity
-        self._web_axis_stage.acceleration = units.Acceleration("200 mm/s^2")
+        self._web_axis_stage.acceleration = units.Acceleration("400 mm/s^2")
 
         # set scan velo/accel
         self._original_scan_velocity = self._scan_axis_stage.max_velocity
         self._scan_axis_stage.max_velocity = 2 * self._web_velocity
-        self._scan_axis_stage.acceleration = units.Acceleration("200 mm/s^2")
+        self._scan_axis_stage.acceleration = units.Acceleration("400 mm/s^2")
 
         # start line acquisition & hold until it is 'active' (prevents premature movements)
         self._strip_acquisition.start()
@@ -365,13 +396,13 @@ class StitchedAcquisition(Acquisition, ABC):
                 self.hw.objective_z_scanner.move_to(self._original_position[2])
 
     def _strip_loop(self):
-        web_margin = 4 * self.spec.pixel_size # should this just be built into the PositionHelper?
+        web_margin = 5 * self.spec.pixel_size # should this just be built into the PositionHelper?
         sleep_time = 0.010
 
         odd_strip_end = self.positioner.web_limits.min - web_margin
-        odd_strip_decel = odd_strip_end + self._acceleration_distance + self._delay_distance
+        odd_strip_decel = odd_strip_end + self._acceleration_distance #+ self._delay_distance
         even_strip_end = self.positioner.web_limits.max + web_margin
-        even_strip_decel = even_strip_end - self._acceleration_distance - self._delay_distance
+        even_strip_decel = even_strip_end - self._acceleration_distance #- self._delay_distance
 
         for z_index in range(self.spec.z_steps):
             scan_center = self.positioner.scan_center(strip_index=0)
@@ -380,15 +411,15 @@ class StitchedAcquisition(Acquisition, ABC):
 
                 # Loop termination conditions
                 if self._stop_event.is_set() or not self._strip_acquisition.is_alive():
-                    return               
+                    return 
+
+                # Wait out any last bit of movement on web axis before starting next move
+                self._web_axis_stage.wait_until_move_finished()
+                self._strip_acquisition.set_strip_index(z_index, strip_index)
 
                 if strip_index % 2:
-                    # Odd strips
-                    self._web_axis_stage.wait_until_move_finished()
                     self._web_axis_stage.move_to(odd_strip_end)
                 else:
-                    # Even strips
-                    self._web_axis_stage.wait_until_move_finished()
                     self._web_axis_stage.move_to(even_strip_end)
 
                 print(f"Starting strip {z_index, strip_index}")
@@ -407,7 +438,7 @@ class StitchedAcquisition(Acquisition, ABC):
                     target_scan_center = self.positioner.scan_center(strip_index=strip_index + 1)
                     self._scan_axis_stage.move_to(target_scan_center)
 
-                    # Wait until scan axis is 75% way to next strip center
+                    # Hold until scan axis is at least 75% way to next strip center
                     threshold = 0.75*target_scan_center + 0.25*scan_center
                     while self._scan_axis_stage.position < threshold:
                         time.sleep(sleep_time)

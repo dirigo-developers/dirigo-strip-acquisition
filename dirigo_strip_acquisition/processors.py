@@ -147,59 +147,67 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
     
     def _work(self):
         scan_trans_thresh = 0.25 * self._spec.line_width
+
+        Nz = self._spec.z_steps
+        Ns = self._positioner.n_strips
         
         try:
-            for z_index in range(self._spec.z_steps):
-                for strip_index in range(self._positioner.n_strips):
-                    self._nlines_copied = 0
+            nlines = 0
+            z_index = 0
+            strip_index = 0
 
-                    web_min = self._positioner.web_min(strip_index)
-                    web_max = self._positioner.web_max(strip_index)
-                    web_length = web_max - web_min
-                    scan_center = self._positioner.scan_center(strip_index) 
-                    strip_center_min = np.array([[web_min, scan_center]])
-                
-                    while True:
-                        with self._receive_product() as frame:
-                            
-                            if self._scan_axis_label == "x":
-                                positions = np.array(frame.positions[:,::-1]) # flip so order is (web[y], scan[x])
-                            else:
-                                positions = np.array(frame.positions)
-                            strip_positions = positions - strip_center_min # relative positions
+            web_min = self._positioner.web_min(strip_index)
+            web_max = self._positioner.web_max(strip_index)
+            web_length = web_max - web_min
+            scan_center = self._positioner.scan_center(strip_index) 
+            strip_center_min = np.array([[web_min, scan_center]])
 
-                            web_valid = (strip_positions[:, 0] >= 0) & (strip_positions[:, 0] <= web_length)
-                            # TODO, would ascending/monotonic be better condition for 'web valid'?
+            # Accumulate strip data
+            while True:
+                with self._receive_product() as frame:
 
-                            if self._positioner.n_strips > 1:
-                                scan_valid = (strip_positions[:, 1] > -scan_trans_thresh) & (strip_positions[:, 1] < scan_trans_thresh)
-                            else:
-                                scan_valid = np.ones(shape=(len(positions),), dtype=np.bool_)
+                    if (frame.strip_index > strip_index) or (frame.depth_index > z_index):
+                        # flush everything we had accumulated
+                        self._flush_strip(nlines, z_index, strip_index)
+                        nlines = 0
 
-                            valid = web_valid & scan_valid
-                            nvalid = int(sum(valid))
+                        # recompute indices and web/scan parameters
+                        z_index = z_index + (strip_index + 1) // Ns
+                        strip_index = (strip_index + 1) % Ns
 
-                            nlc = self._nlines_copied # for brevity below
-                            if nlc+nvalid > self._buffer.shape[0]:
-                                print("problem")
-                            self._buffer[nlc:(nlc+nvalid),:,:] = frame.data[valid]
-                            self._positions[nlc:(nlc+nvalid),:] = strip_positions[valid]
-                            self._nlines_copied += nvalid
+                        web_min = self._positioner.web_min(strip_index)
+                        web_max = self._positioner.web_max(strip_index)
+                        web_length = web_max - web_min
+                        scan_center = self._positioner.scan_center(strip_index) 
+                        strip_center_min = np.array([[web_min, scan_center]])
 
-                            # TODO store carry over lines for next strip
+                    if self._scan_axis_label == "x":
+                        positions = np.array(frame.positions[:,::-1]) # flip so order is (web[y], scan[x])
+                    else:
+                        positions = np.array(frame.positions)
+                    strip_positions = positions - strip_center_min # relative positions
 
-                            if (self._nlines_copied > 0) and (not valid[-1]):
-                                break # break out of while loop
+                    web_valid = (strip_positions[:, 0] >= 0) & (strip_positions[:, 0] <= web_length)
 
-                    self._flush_strip(z_index, strip_index)
+                    if self._positioner.n_strips > 1:
+                        scan_valid = (strip_positions[:, 1] > -scan_trans_thresh) & (strip_positions[:, 1] < scan_trans_thresh)
+                    else:
+                        scan_valid = np.ones(shape=(len(positions),), dtype=np.bool_)
+
+                    valid = web_valid & scan_valid
+                    nvalid = int(sum(valid))
+
+                    self._buffer[nlines:(nlines+nvalid),:,:] = frame.data[valid]
+                    self._positions[nlines:(nlines+nvalid),:] = strip_positions[valid]
+                    nlines += nvalid
 
         except EndOfStream:
-            self._flush_strip(z_index, strip_index)
+            self._flush_strip(nlines, z_index, strip_index)
 
         finally:
             self._publish(None)
 
-    def _flush_strip(self, z_index: int, strip_index: int):
+    def _flush_strip(self, nlines: int, z_index: int, strip_index: int):
 
         source_web_px = self._positions[:, 0] / self._spec.pixel_size
         source_scan_px = self._positions[:, 1] / self._spec.pixel_size
@@ -210,15 +218,16 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
         _resample_strip_nearest_kernel(
             strip               = strip.data, # final strip data
             strip_index         = strip_index,
-            nlines_copied       = self._nlines_copied,
+            nlines_copied       = nlines,
             lines               = self._buffer,
             source_web_px       = source_web_px,
             source_scan_px      = source_scan_px,
             channel_row_offsets = self.channel_shear(strip_index),
         )
 
-        strip.indices = (z_index, strip_index)
-        print(f"Publishing strip with indices {strip.indices} (n lines copied: {self._nlines_copied})")
+        strip.depth_index = z_index
+        strip.strip_index = strip_index
+        print(f"Publishing strip with indices (z, strip) = ({z_index},{strip_index})")
         self._publish(strip)
     
     @property
@@ -267,12 +276,11 @@ class StripStitcher(Processor[StripProcessor]):
             stitched_strip = self._get_free_product()
             while True:
                 with self._receive_product() as in_strip:
-                    if in_strip.indices is None: # (z, strip)
-                        raise RuntimeError("Strip products must include indices.")
 
-                    if in_strip.indices[1] == 0:
+                    if in_strip.strip_index == 0:
                         stitched_strip.data[...] = in_strip.data
-                        stitched_strip.indices = tuple(in_strip.indices)
+                        stitched_strip.strip_index = in_strip.strip_index
+                        stitched_strip.depth_index = in_strip.depth_index
                         
                         if self.n_strips == 1:
                             self._publish(stitched_strip)
@@ -318,18 +326,17 @@ class StripStitcher(Processor[StripProcessor]):
 
                         a[:, -w:, :] = blended  # only correct A since B (edge) will not be used for tiles
                     
-                    print(f"Publishing stitched strip {stitched_strip.indices}")
                     self._publish(stitched_strip)
                     stitched_strip = self._get_free_product()
                     stitched_strip.data[...] = in_strip.data
-                    stitched_strip.indices = tuple(in_strip.indices)
+                    stitched_strip.strip_index = in_strip.strip_index
+                    stitched_strip.depth_index = in_strip.depth_index
 
-                    if in_strip.indices[1] == self.n_strips - 1:
+                    if in_strip.strip_index == self.n_strips - 1:
                         # on last strip of the z opt. section, publish last strip
                         correction = np.linspace(prev_correction, 1, b.shape[1])
                         stitched_strip.data[...] = self._to_int16(b * correction[None,:,:])
 
-                        print(f"Publishing stitched strip {in_strip.indices}")
                         self._publish(stitched_strip)
                         stitched_strip = self._get_free_product()
 
@@ -437,9 +444,6 @@ class TileBuilder(Processor[StripStitcher]):
         try:
             while True: # Looping in strips
                 with self._receive_product() as strip:
-                    
-                    if strip.indices is None:
-                        raise RuntimeError("Strip must include indices")
 
                     while True: # Looping in tiles scan, tiles web
                         t_s = tile_idx // tiles_web   # tile coordinate scan dim (parallel to acquired line)
@@ -454,7 +458,7 @@ class TileBuilder(Processor[StripStitcher]):
                         
                         p_s = t_s * tile_shape[0]   # scan dim global pixel tile start
                         p_w = t_w * tile_shape[1]   # web dim global pixel tile start
-                        scan_offset = strip.indices[1] * effective_pixels_per_line # scan dim global pixel strip start
+                        scan_offset = strip.strip_index * effective_pixels_per_line # scan dim global pixel strip start
 
                         p_so = p_s - scan_offset   # scan pixel coordinate relative to the current strip
                         # p_so < 0 means that the tile "starts" in the previous strip
@@ -463,7 +467,7 @@ class TileBuilder(Processor[StripStitcher]):
                         if (p_so + tile_shape[0]) > strip.data.shape[1]:
                             self._leftovers = strip.data[:, p_so:, :].copy()
                             # and not last strip of z level:
-                            if strip.indices[1] < (self._n_strips-1):
+                            if strip.strip_index < (self._n_strips - 1):
                                 break # go on to recieve a new strip to complete the tile
 
                         tile = self._get_free_product()
