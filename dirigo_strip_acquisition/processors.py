@@ -146,7 +146,7 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
         return super()._receive_product() # type: ignore
     
     def _work(self):
-        scan_trans_thresh = 0.25 * self._spec.line_width
+        scan_trans_thresh = 0.33 * self._spec.line_width
 
         Nz = self._spec.z_steps
         Ns = self._positioner.n_strips
@@ -167,7 +167,7 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
                 with self._receive_product() as frame:
 
                     if (frame.strip_index > strip_index) or (frame.depth_index > z_index):
-                        # flush everything we had accumulated
+                        # flush everything accumulated
                         self._flush_strip(nlines, z_index, strip_index)
                         nlines = 0
 

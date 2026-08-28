@@ -222,10 +222,15 @@ class StitchedAcquisitionSpec(AcquisitionSpec):
     def __init__(self, 
                  x_range: units.PositionRange | dict, 
                  y_range: units.PositionRange | dict, 
-                 z_range: units.PositionRange | dict, 
-                 z_step: units.Position | str,
-                 strip_overlap: float = 0.05
+                 strip_overlap: float,
+                 z_range: units.PositionRange | dict | None = None, 
+                 z_step: units.Position | str | None = None,
                  ) -> None:
+
+        if (z_range is None) != (z_step is None):
+            raise ValueError(
+                "`z_range` and `z_step` must either both be provided or both be None"
+            )
         
         if isinstance(x_range, units.PositionRange):
             self.x_range = x_range
@@ -237,23 +242,37 @@ class StitchedAcquisitionSpec(AcquisitionSpec):
         else:
             self.y_range = units.PositionRange(**y_range)
 
-        if isinstance(z_range, units.PositionRange):
+        if z_range is None:
+            self.z_range = None
+        elif isinstance(z_range, units.PositionRange):
             self.z_range = z_range
         else:
             self.z_range = units.PositionRange(**z_range)
-        
-        if isinstance(z_step, units.Position):
+
+        if z_step is None:
+            self.z_range = None
+        elif isinstance(z_step, units.Position):
             self.z_step = z_step
         else:
             self.z_step = units.Position(z_step)
+
+        if z_range is not None and self.z_step <= 0:
+            raise ValueError("`z_step` must be positive.")
 
         if not (0 <= strip_overlap < 1):
             raise ValueError(f"`overlap` must be a float between 0 and 1")
         self.strip_overlap = strip_overlap
 
+    @property
+    def has_z_motion(self) -> bool:
+        return self.z_range is not None and self.z_step is not None
+    
     @cached_property
     def z_steps(self) -> int:
-        return math.ceil( abs(self.z_range.range / self.z_step) )
+        if not self.has_z_motion:
+            return 1
+        
+        return math.ceil(self.z_range.range / self.z_step)
       
 
 class StitchedAcquisition(Acquisition, ABC):
@@ -299,34 +318,48 @@ class StitchedAcquisition(Acquisition, ABC):
 
         # define functional axes (web & scan axes terminology from industrial web inspection)
         if self._strip_acquisition.axis == 'x':
-            self._scan_axis_stage = self.hw.stages.x
-            self._web_axis_stage = self.hw.stages.y # web axis = perpendicular to the fast raster scanner / line-scan camera axis
+            self._scan_stage = self.hw.stages.x
+            self._web_stage = self.hw.stages.y # web axis = perpendicular to the fast raster scanner / line-scan camera axis
             self._web_encoder = self.hw.encoders.y
             n_pixels_scan = round(self.spec.x_range.range / self._strip_acquisition.spec.pixel_size)
             n_pixels_web  = round(self.spec.y_range.range / self._strip_acquisition.spec.pixel_size)
         else:
-            self._scan_axis_stage = self.hw.stages.y
-            self._web_axis_stage = self.hw.stages.x
+            self._scan_stage = self.hw.stages.y
+            self._web_stage = self.hw.stages.x
             self._web_encoder = self.hw.encoders.x
             n_pixels_scan = round(self.spec.y_range.range / self._strip_acquisition.spec.pixel_size)
             n_pixels_web  = round(self.spec.x_range.range / self._strip_acquisition.spec.pixel_size)
 
+        if self.spec.has_z_motion:
+            self._z_stage = self.hw.objective_z_scanner
+
         # non-blocking move to initial start position, since this takes time
         # TODO revise this, since actual stage movement during Worker instantiation is unintuitive
-        self._original_position = (
-            self.hw.stages.x.position, 
+        self._original_xy_position = (
+            self.hw.stages.x.position,
             self.hw.stages.y.position,
-            self.hw.objective_z_scanner.position
         )
-        self.hw.objective_z_scanner.move_to(self.spec.z_range.min)
-        self._scan_axis_stage.move_to(
+        self._original_z_position: units.Position | None = None
+
+        self._scan_stage.move_to(
             self.positioner.scan_center(strip_index=0)
         )
-        self._web_axis_stage.move_to(
+        self._web_stage.move_to(
             self.positioner.web_min(strip_index=0) - 5 * self.spec.pixel_size # a bit extra movement to be sure we trigger enough samples
         )
 
-        self._final_shape = (self.spec.z_steps, n_pixels_scan, n_pixels_web, n_channels) 
+        if self.spec.has_z_motion:
+            self._original_z_position = self.hw.objective_z_scanner.position
+
+            self._z_stage.move_to(self.spec.z_range.min - self._z_stage.backlash, blocking=True)
+            self._z_stage.move_to(self.spec.z_range.min)
+
+        self._final_shape = (
+            self.spec.z_steps, 
+            n_pixels_scan, 
+            n_pixels_web, 
+            n_channels
+        )
 
     @property
     def final_shape(self) -> tuple[int,int,int,int]:
@@ -349,22 +382,22 @@ class StitchedAcquisition(Acquisition, ABC):
 
     def _work(self):
         
-        self._scan_axis_stage.wait_until_move_finished()
-        self._web_axis_stage.wait_until_move_finished()
+        self._scan_stage.wait_until_move_finished()
+        self._web_stage.wait_until_move_finished()
 
-        # set objective Z scanner velo/accel
-        self.hw.objective_z_scanner.max_velocity = units.Velocity("200 um/s") # TODO, put this in z scanner config
-        self.hw.objective_z_scanner.acceleration = units.Acceleration("1 mm/s^2")
+        if self.spec.has_z_motion:
+            self._z_stage.max_velocity = units.Velocity("200 um/s")
+            self._z_stage.acceleration = units.Acceleration("1 mm/s^2")
 
         # set web velo/accel
-        self._original_web_velocity = self._web_axis_stage.max_velocity
-        self._web_axis_stage.max_velocity = self._web_velocity
-        self._web_axis_stage.acceleration = units.Acceleration("400 mm/s^2")
+        self._original_web_velocity = self._web_stage.max_velocity
+        self._web_stage.max_velocity = self._web_velocity
+        self._web_stage.acceleration = units.Acceleration("400 mm/s^2")
 
         # set scan velo/accel
-        self._original_scan_velocity = self._scan_axis_stage.max_velocity
-        self._scan_axis_stage.max_velocity = 2 * self._web_velocity
-        self._scan_axis_stage.acceleration = units.Acceleration("400 mm/s^2")
+        self._original_scan_velocity = self._scan_stage.max_velocity
+        self._scan_stage.max_velocity = 2 * self._web_velocity
+        self._scan_stage.acceleration = units.Acceleration("400 mm/s^2")
 
         # start line acquisition & hold until it is 'active' (prevents premature movements)
         self._strip_acquisition.start()
@@ -387,13 +420,15 @@ class StitchedAcquisition(Acquisition, ABC):
             self.hw.stages.x.wait_until_move_finished()
             self.hw.stages.y.wait_until_move_finished()
 
-            self._web_axis_stage.max_velocity = self._original_web_velocity
-            self._scan_axis_stage.max_velocity = self._original_scan_velocity
+            self._web_stage.max_velocity = self._original_web_velocity
+            self._scan_stage.max_velocity = self._original_scan_velocity
 
             if self.return_to_original_position:
-                self.hw.stages.x.move_to(self._original_position[0])
-                self.hw.stages.y.move_to(self._original_position[1])
-                self.hw.objective_z_scanner.move_to(self._original_position[2])
+                self.hw.stages.x.move_to(self._original_xy_position[0])
+                self.hw.stages.y.move_to(self._original_xy_position[1])
+
+                if self._original_z_position is not None:
+                    self._z_stage.move_to(self._original_z_position)
 
     def _strip_loop(self):
         web_margin = 5 * self.spec.pixel_size # should this just be built into the PositionHelper?
@@ -414,64 +449,62 @@ class StitchedAcquisition(Acquisition, ABC):
                     return 
 
                 # Wait out any last bit of movement on web axis before starting next move
-                self._web_axis_stage.wait_until_move_finished()
+                self._web_stage.wait_until_move_finished()
                 self._strip_acquisition.set_strip_index(z_index, strip_index)
 
                 if strip_index % 2:
-                    self._web_axis_stage.move_to(odd_strip_end)
+                    self._web_stage.move_to(odd_strip_end)
                 else:
-                    self._web_axis_stage.move_to(even_strip_end)
+                    self._web_stage.move_to(even_strip_end)
 
                 print(f"Starting strip {z_index, strip_index}")
                 time.sleep(sleep_time)
 
                 # Wait until reach deceleration position
                 if strip_index % 2:
-                    while self._web_axis_stage.position > odd_strip_decel:
+                    while self._web_stage.position > odd_strip_decel:
                         time.sleep(sleep_time)
                 else:
-                    while self._web_axis_stage.position < even_strip_decel:
+                    while self._web_stage.position < even_strip_decel:
                         time.sleep(sleep_time)
 
                 if strip_index < (self.positioner.n_strips - 1):
                     # begin lateral movement to the next strip
                     target_scan_center = self.positioner.scan_center(strip_index=strip_index + 1)
-                    self._scan_axis_stage.move_to(target_scan_center)
+                    self._scan_stage.move_to(target_scan_center)
 
                     # Hold until scan axis is at least 75% way to next strip center
                     threshold = 0.75*target_scan_center + 0.25*scan_center
-                    while self._scan_axis_stage.position < threshold:
+                    while self._scan_stage.position < threshold:
                         time.sleep(sleep_time)
 
                     scan_center = target_scan_center
             
             # wait for previous web axis movement to come to complete stop
-            self._web_axis_stage.wait_until_move_finished()
+            self._web_stage.wait_until_move_finished()
             
-            if z_index < (self.spec.z_steps - 1): # if not on last z level
+            if self.spec.has_z_motion and z_index < (self.spec.z_steps - 1):
                 
                 # Change web axis velocity (usually faster)
-                self._web_axis_stage.max_velocity = self._original_web_velocity
+                self._web_stage.max_velocity = self._original_web_velocity
 
-                # Move Z
-                self.hw.objective_z_scanner.move_to(
+                self._z_stage.move_to(
                     self.spec.z_range.min + (z_index+1) * self.spec.z_step
                 )
 
-                # Move back to XY starting point
-                self._scan_axis_stage.move_to(
+                self._scan_stage.move_to(
                     self.positioner.scan_center(strip_index=0)
                 )
-                self._web_axis_stage.move_to(
+                self._web_stage.move_to(
                     self.positioner.web_limits.min - self.spec.pixel_size
                 )
 
                 time.sleep(0.050) # to make certain the stages have started moving
-                self._scan_axis_stage.wait_until_move_finished()
-                self._web_axis_stage.wait_until_move_finished()
+                self._scan_stage.wait_until_move_finished()
+                self._web_stage.wait_until_move_finished()
 
                 # Set acquisition web axis velocity
-                self._web_axis_stage.max_velocity = self._web_velocity
+                self._web_stage.max_velocity = self._web_velocity
 
     @property
     def runtime_info(self):
@@ -487,7 +520,7 @@ class StitchedAcquisition(Acquisition, ABC):
     @cached_property
     def _acceleration_time(self) -> units.Time:
         x_strip = self.positioner.web_limits.range
-        a = self._web_axis_stage.acceleration
+        a = self._web_stage.acceleration
         v_max = self._web_velocity
         x_accel = v_max**2 / (2 * a)
 
@@ -499,9 +532,9 @@ class StitchedAcquisition(Acquisition, ABC):
     @cached_property
     def _acceleration_distance(self) -> units.Position:
         x_strip = self.positioner.web_limits.range
-        a = self._web_axis_stage.acceleration
+        a = self._web_stage.acceleration
         v_max = self._web_velocity
-        x_accel = v_max**2 / (2 * a)
+        x_accel = (v_max/2)**2 / (2 * a)
 
         if x_strip < (2 * x_accel):
             return units.Position(x_strip / 2)
@@ -518,33 +551,36 @@ class StitchedAcquisition(Acquisition, ABC):
 
 # ---------- Stitched acquisitions concrete classes ----------
 class RasterScanStitchedAcquisitionSpec(StitchedAcquisitionSpec, RasterScanStripAcquisitionSpec):
-    def __init__(self,
-                 x_range: units.PositionRange | dict,
-                 y_range: units.PositionRange | dict,
-                 z_range: units.PositionRange | dict,
-                 z_step: units.Position | str,
-                 strip_overlap: float,
-                 line_width: units.Position | str,
-                 pixel_size: units.Position | str,
-                 line_duty_cycle: float,
-                 bidirectional_scanning: bool,
-                 lines_per_buffer: int,
-                 **kwargs) -> None:
+    def __init__(
+        self,
+        x_range: units.PositionRange | dict,
+        y_range: units.PositionRange | dict,
+        strip_overlap: float,
+        line_width: units.Position | str,
+        pixel_size: units.Position | str,
+        line_duty_cycle: float,
+        bidirectional_scanning: bool,
+        lines_per_buffer: int,
+        z_range: units.PositionRange | dict | None = None,
+        z_step: units.Position | str | None = None,
+        **kwargs,
+    ):
         StitchedAcquisitionSpec.__init__(
             self,
             x_range=x_range,
             y_range=y_range,
+            strip_overlap=strip_overlap,
             z_range=z_range,
             z_step=z_step,
-            strip_overlap=strip_overlap
         )
         RasterScanStripAcquisitionSpec.__init__(
             self,
-            line_width              = line_width,
-            pixel_size              = pixel_size,
-            line_duty_cycle         = line_duty_cycle,
-            bidirectional_scanning  = bidirectional_scanning,
-            lines_per_buffer        = lines_per_buffer
+            line_width=line_width,
+            pixel_size=pixel_size,
+            line_duty_cycle=line_duty_cycle,
+            bidirectional_scanning=bidirectional_scanning,
+            lines_per_buffer=lines_per_buffer,
+            **kwargs
         )
 
 
@@ -567,18 +603,20 @@ class RasterScanStitchedAcquisition(StitchedAcquisition):
 
 
 class LineCameraStitchedAcquisitionSpec(StitchedAcquisitionSpec, LineCameraStripAcquisitionSpec):
-    def __init__(self,
-                 x_range: units.PositionRange | dict,
-                 y_range: units.PositionRange | dict,
-                 z_range: units.PositionRange | dict,
-                 z_step: units.Position | str,
-                 strip_overlap: float,
-                 line_width: units.Position | str,
-                 pixel_size: units.Position | str,
-                 integration_time: units.Time | str,
-                 line_period: units.Time | str,
-                 lines_per_buffer: int,
-                 **kwargs):
+    def __init__(
+        self,
+        x_range: units.PositionRange | dict,
+        y_range: units.PositionRange | dict,
+        strip_overlap: float,
+        line_width: units.Position | str,
+        pixel_size: units.Position | str,
+        integration_time: units.Time | str,
+        line_period: units.Time | str,
+        lines_per_buffer: int,
+        z_range: units.PositionRange | dict | None = None,
+        z_step: units.Position | str | None = None,
+        **kwargs,
+    ):
         StitchedAcquisitionSpec.__init__(
             self,
             x_range=x_range,
