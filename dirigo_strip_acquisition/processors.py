@@ -26,69 +26,105 @@ int64_1d_readonly = types.Array(types.int64, 1, "C", readonly=True)
 sig_resample = [
     void(
         types.int16[:, :, :],       # strip
-        types.int64,                # strip_index
-        types.int64,                # nlines_copied
-        int16_3d_readonly,          # lines
-        float64_1d_readonly,        # source_web_px, sorted ascending
-        float64_1d_readonly,        # source_scan_px, same order
-        int64_1d_readonly           # channel_row_offsets
+        int16_3d_readonly,          # lines, acquisition order
+        float64_1d_readonly,        # sorted_source_web_px
+        float64_1d_readonly,        # sorted_source_scan_px
+        int64_1d_readonly,          # sorted index -> row in lines
+        int64_1d_readonly,          # channel row offsets
+        types.float64,              # max_nearest_distance_px
     )
 ]
 
 
-@njit(sig_resample, parallel=True, fastmath=True, cache=True)
-def _resample_strip_nearest_kernel(
-    strip: np.ndarray,                 # (web, scan, chan)
-    strip_index: int,
-    nlines_copied: int,
-    lines: np.ndarray,                 # (line_idx, scan, chan), sorted by web position
-    source_web_px: np.ndarray,         # line_idx -> web position in pixels
-    source_scan_px: np.ndarray,        # line_idx -> scan shift in pixels
-    channel_row_offsets: np.ndarray):  # chan -> row offset in pixels
+@njit(inline="always")
+def _nearest_sorted_index(sorted_x: np.ndarray, target: int) -> int:
+    """Return the index of the nearest value in nondecreasing sorted_x."""
+    n = sorted_x.size
 
+    # Lower bound: first index whose value is >= target.
+    lo = 0
+    hi = n
+
+    while lo < hi:
+        mid = (lo + hi) // 2
+
+        if sorted_x[mid] < target:
+            lo = mid + 1
+        else:
+            hi = mid
+
+    if lo == 0:
+        return 0
+
+    if lo == n:
+        return n - 1
+
+    before = lo - 1
+    after = lo
+
+    # Ties intentionally select the lower-position source record.
+    if target - sorted_x[before] <= sorted_x[after] - target:
+        return before
+
+    return after
+
+
+@njit(sig_resample, parallel=True, cache=True)
+def _resample_strip_nearest_kernel(
+    strip: np.ndarray,                  # (web, scan, chan)
+    lines: np.ndarray,                  # (source-line, scan, channel)
+    sorted_source_web_px: np.ndarray,   # sorted spatial positions
+    sorted_source_scan_px: np.ndarray,  # same sorted order
+    source_line_indices: np.ndarray,    # sorted index -> lines row
+    channel_row_offsets: np.ndarray,
+    max_nearest_distance_px: float,     
+):
     n_height, n_width, n_chan = strip.shape
 
-    # Compute interpolation source indices (this can't be done parallel)
-    src_indices = np.zeros((n_height,), np.int64)
+    src_indices = np.full(n_height, -1, np.int64)
 
-    if strip_index % 2 == 0:
-        # Forward strips
-        i = 0
-        for trgt_row in range(n_height):
-            while abs(source_web_px[i+1]-trgt_row) < abs(source_web_px[i]-trgt_row):
-                i += 1
-            src_indices[trgt_row] = i
-    else:
-        i = 0
-        for trgt_row in range(n_height-1, -1, -1): # fill backwards
-            while abs(source_web_px[i+1]-trgt_row) < abs(source_web_px[i]-trgt_row):
-                i += 1
-            src_indices[trgt_row] = i
+    # Each destination row is independent with binary search.
+    for target_row in prange(n_height):
+        sorted_idx = _nearest_sorted_index(sorted_source_web_px, target_row)
 
-    # Perform NN interpolation
+        dist = abs(sorted_source_web_px[sorted_idx] - target_row) 
+        if dist <= max_nearest_distance_px:
+            src_indices[target_row] = sorted_idx
+
+    # Copy source pixels into the output strip
     for dst_row in prange(n_height):
-        for ch in range(n_chan):
-            target_web_px = dst_row - channel_row_offsets[ch]
+        for c in range(n_chan):
+            target_web_px = dst_row - channel_row_offsets[c]
 
-            src_idx = src_indices[target_web_px]
-
-            if src_idx < 0:
+            if target_web_px < 0 or target_web_px >= n_height:
                 continue
 
-            scan_shift = int(round(source_scan_px[src_idx]))
+            sorted_idx  = src_indices[target_web_px]
 
-            for dst_j in range(n_width):
-                src_j = dst_j - scan_shift
+            if sorted_idx < 0:
+                continue
 
-                if 0 <= src_j < n_width:
-                    strip[dst_row, dst_j, ch] = lines[src_idx, src_j, ch]
+            line_idx = source_line_indices[sorted_idx]
+
+            if line_idx < 0 or line_idx >= lines.shape[0]:
+                continue
+
+            scan_shift = int(round(sorted_source_scan_px[sorted_idx]))
+
+            dst_start = max(0, scan_shift)
+            dst_stop = min(n_width, n_width + scan_shift)
+
+            for dst_j in range(dst_start, dst_stop):
+                strip[dst_row, dst_j, c] = lines[line_idx, dst_j - scan_shift, c]
 
 
 class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be used with a LineCamera Processor (not limited to raster)
     """Receives position-encoded line data and places lines into strip."""
-    def __init__(self, 
-                 upstream: RasterFrameProcessor,
-                 channel_shear: np.ndarray | None = None):
+    def __init__(
+            self, 
+            upstream: RasterFrameProcessor,
+            channel_shear: np.ndarray | None = None
+        ):
         
         super().__init__(upstream, name="StripProcessor")
         
@@ -190,12 +226,21 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
                     web_valid = (strip_positions[:, 0] >= 0) & (strip_positions[:, 0] <= web_length)
 
                     if self._positioner.n_strips > 1:
-                        scan_valid = (strip_positions[:, 1] > -scan_trans_thresh) & (strip_positions[:, 1] < scan_trans_thresh)
+                        scan_valid = (
+                            (strip_positions[:, 1] > -scan_trans_thresh) 
+                            & (strip_positions[:, 1] < scan_trans_thresh)
+                        )
                     else:
                         scan_valid = np.ones(shape=(len(positions),), dtype=np.bool_)
 
                     valid = web_valid & scan_valid
                     nvalid = int(sum(valid))
+
+                    if nlines + nvalid > self._buffer.shape[0]:
+                        raise RuntimeError(
+                            f"Strip line buffer overflow: need {nlines + nvalid}, "
+                            f"capacity is {self._buffer.shape[0]}"
+                        )
 
                     self._buffer[nlines:(nlines+nvalid),:,:] = frame.data[valid]
                     self._positions[nlines:(nlines+nvalid),:] = strip_positions[valid]
@@ -208,21 +253,42 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
             self._publish(None)
 
     def _flush_strip(self, nlines: int, z_index: int, strip_index: int):
-
-        source_web_px = self._positions[:, 0] / self._spec.pixel_size
-        source_scan_px = self._positions[:, 1] / self._spec.pixel_size
+        if nlines < 1:
+            raise RuntimeError(f"Invalid source-line count, {nlines}")
 
         strip = self._get_free_product()
-        strip.data[...] = 0 # TODO, is this needed with new resampling strategy?
+        strip.data.fill(0)
+
+        source_positions = self._positions[:nlines]
+        web_px = source_positions[:, 0] / self._spec.pixel_size
+        scan_px = source_positions[:, 1] / self._spec.pixel_size
+
+        finite = np.isfinite(web_px) & np.isfinite(scan_px)
+        source_line_indices = np.flatnonzero(finite).astype(np.int64, copy=False)
+
+        order = np.argsort(web_px[source_line_indices], kind="stable")
+
+        source_line_indices = np.ascontiguousarray(
+            source_line_indices[order],
+            dtype=np.int64,
+        )
+        sorted_source_web_px = np.ascontiguousarray(
+            web_px[source_line_indices],
+            dtype=np.float64,
+        )
+        sorted_source_scan_px = np.ascontiguousarray(
+            scan_px[source_line_indices],
+            dtype=np.float64,
+        )
 
         _resample_strip_nearest_kernel(
-            strip               = strip.data, # final strip data
-            strip_index         = strip_index,
-            nlines_copied       = nlines,
-            lines               = self._buffer,
-            source_web_px       = source_web_px,
-            source_scan_px      = source_scan_px,
-            channel_row_offsets = self.channel_shear(strip_index),
+            strip=strip.data,
+            lines=self._buffer[:nlines],
+            sorted_source_web_px=sorted_source_web_px,
+            sorted_source_scan_px=sorted_source_scan_px,
+            source_line_indices=source_line_indices,
+            channel_row_offsets=self.channel_shear(strip_index),
+            max_nearest_distance_px=3,
         )
 
         strip.depth_index = z_index

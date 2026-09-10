@@ -294,7 +294,6 @@ class StitchedAcquisition(Acquisition, ABC):
         super().__init__(hw, system_config, spec)
         self.spec: RasterScanStitchedAcquisitionSpec | LineCameraStitchedAcquisitionSpec # to refine type hints
 
-        self.return_to_original_position = False # Flag to send stages back to where they started
         self._original_web_velocity: units.Velocity | None = None
         self._original_scan_velocity: units.Velocity | None = None
 
@@ -334,13 +333,7 @@ class StitchedAcquisition(Acquisition, ABC):
             self._z_stage = self.hw.objective_z_scanner
 
         # non-blocking move to initial start position, since this takes time
-        # TODO revise this, since actual stage movement during Worker instantiation is unintuitive
-        self._original_xy_position = (
-            self.hw.stages.x.position,
-            self.hw.stages.y.position,
-        )
-        self._original_z_position: units.Position | None = None
-
+        # Consider revising this; actual stage movement during Worker instantiation is unintuitive
         self._scan_stage.move_to(
             self.positioner.scan_center(strip_index=0)
         )
@@ -349,8 +342,6 @@ class StitchedAcquisition(Acquisition, ABC):
         )
 
         if self.spec.has_z_motion:
-            self._original_z_position = self.hw.objective_z_scanner.position
-
             self._z_stage.move_to(self.spec.z_range.min - self._z_stage.backlash, blocking=True)
             self._z_stage.move_to(self.spec.z_range.min)
 
@@ -416,19 +407,11 @@ class StitchedAcquisition(Acquisition, ABC):
             if self.hw.stages.y.moving:
                 self.hw.stages.y.stop()           
 
-            # Return to original position
             self.hw.stages.x.wait_until_move_finished()
             self.hw.stages.y.wait_until_move_finished()
 
             self._web_stage.max_velocity = self._original_web_velocity
             self._scan_stage.max_velocity = self._original_scan_velocity
-
-            if self.return_to_original_position:
-                self.hw.stages.x.move_to(self._original_xy_position[0])
-                self.hw.stages.y.move_to(self._original_xy_position[1])
-
-                if self._original_z_position is not None:
-                    self._z_stage.move_to(self._original_z_position)
 
     def _strip_loop(self):
         web_margin = 5 * self.spec.pixel_size # should this just be built into the PositionHelper?
