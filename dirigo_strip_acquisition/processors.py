@@ -173,10 +173,14 @@ class StripProcessor(Processor[RasterFrameProcessor]): # TODO this can also be u
         )
 
         # Make large buffer to contain incoming line data
-        # TODO allocate smarter, currently it's just 2X the strip web length
-        buffer_shape = (2*self._strip_shape[0], self._strip_shape[1], self._strip_shape[2])
+        # TODO allocate smarter, currently it's just 4X the strip web length
+        buffer_shape = (
+            4 * self._strip_shape[0], 
+            self._strip_shape[1], 
+            self._strip_shape[2]
+        )
         self._buffer = np.zeros(shape=buffer_shape, dtype=np.int16)
-        self._positions = np.zeros(shape=(2*self._strip_shape[0], 2), dtype=np.float64)
+        self._positions = np.zeros(shape=(buffer_shape[0], 2), dtype=np.float64)
         
     def _receive_product(self) -> ProcessorProduct:
         return super()._receive_product() # type: ignore
