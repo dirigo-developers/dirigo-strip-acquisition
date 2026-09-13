@@ -695,3 +695,31 @@ class StitchedPreview(Processor):
     def data_range(self) -> units.IntRange:
         return self._data_range
 
+
+# ----- Progress Updater -----
+class StitchedProgressUpdate(Processor):
+    """
+    Publishes a precent complete update (float, 0-1) after each processed strip.
+    """
+    def __init__(self, upstream: StripProcessor):
+        super().__init__(upstream, name="Stitched Acquisition Progress")
+
+        acq = upstream._acquisition
+        self._n_strips_per_depth = acq.positioner.n_strips
+        self._n_strips_total = acq.positioner.n_strips * acq.spec.z_steps
+
+    def _work(self):
+        N_depth = self._n_strips_per_depth
+        N_total = self._n_strips_total
+
+        try:
+            while True:
+                with self._receive_product() as strip:
+                    strip: ProcessorProduct
+
+                    i = strip.strip_index + strip.depth_index * N_depth
+
+                    self._publish(float(i / N_total))
+
+        except EndOfStream:
+            pass

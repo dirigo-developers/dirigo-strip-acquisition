@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dirigo_strip_acquisition"
-version = "0.1.7"
+version = "0.1.8"
 description = "Plugin for strip acquisitions in Dirigo."
 authors = [
     {name = "T. D. Weber", email = "tweber@mit.edu"}
@@ -21,6 +21,7 @@ strip = "dirigo_strip_acquisition:StripProcessor"
 strip_stitcher = "dirigo_strip_acquisition:StripStitcher"
 tile_builder = "dirigo_strip_acquisition:TileBuilder"
 stitch_preview = "dirigo_strip_acquisition:StitchedPreview"
+stitch_progress_update = "dirigo_strip_acquisition:StitchedProgressUpdate"
 
 [project.entry-points."dirigo_writers"]
 pyramid = "dirigo_strip_acquisition:PyramidWriter"
