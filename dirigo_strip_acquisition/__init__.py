@@ -3,7 +3,7 @@ from dirigo_strip_acquisition.acquisitions import (
     LineCameraStitchedAcquisitionSpec, LineCameraStitchedAcquisition
 )
 from dirigo_strip_acquisition.processors import (
-    StripProcessor, StripStitcher, TileBuilder, StitchedPreview
+    StripProcessor, StripStitcher, TileBuilder, StitchedPreview, StitchedProgressUpdate
 )
 from dirigo_strip_acquisition.writers import PyramidWriter
 
@@ -11,5 +11,5 @@ __all__ = [
     'RasterScanStitchedAcquisitionSpec', 'RasterScanStitchedAcquisition', 
     'LineCameraStitchedAcquisitionSpec', 'LineCameraStitchedAcquisition',
     'StripProcessor', 'StripStitcher', 'TileBuilder', 'StitchedPreview',
-    'PyramidWriter'
+    'PyramidWriter', 'StitchedProgressUpdate'
 ]

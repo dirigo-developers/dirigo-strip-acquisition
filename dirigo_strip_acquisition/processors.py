@@ -719,7 +719,11 @@ class StitchedProgressUpdate(Processor):
 
                     i = strip.strip_index + strip.depth_index * N_depth
 
-                    self._publish(float(i / N_total))
+                    self._publish(float((i+1) / N_total))
 
         except EndOfStream:
             pass
+
+    @property
+    def data_range(self) -> units.FloatRange:
+        return units.FloatRange(0.0, 1.0)
