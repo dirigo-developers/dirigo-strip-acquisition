@@ -615,7 +615,6 @@ class LineCameraStitchedAcquisitionSpec(StitchedAcquisitionSpec, LineCameraStrip
             integration_time=integration_time,
             line_period=line_period,
             lines_per_buffer=lines_per_buffer,
-            **kwargs
         )
 
 

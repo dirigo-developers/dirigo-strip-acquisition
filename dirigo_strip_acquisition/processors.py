@@ -568,8 +568,9 @@ class TileBuilder(Processor[StripStitcher]):
                                 :
                             ]
                             tile.data[:data2.shape[0], -data2.shape[1]:, :] = data2
-                        
-                        _transpose_inplace(tile.data) # go from strips in dimensions (web, scan, chan) to tiles in (scan, web, chan)
+
+                        if self._acquisition.system_config.fast_raster_scanner['axis'] == "y":
+                            _transpose_inplace(tile.data) # go from strips in dimensions (web, scan, chan) to tiles in (scan, web, chan)
 
                         self._publish(tile)
                         tile_idx += 1
