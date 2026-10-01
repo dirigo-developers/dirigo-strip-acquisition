@@ -187,6 +187,9 @@ class PyramidWriter(Writer):
                 native_level = tif.series[0].levels[0]
 
                 for page in native_level.pages:
+                    if not hasattr(page, 'tags'):
+                        # tifffile sometimes returns type TiffFrame (lacking tags) rather than TiffPage 
+                        page = page.aspage()
                     self._patch_page_column_major(page)
 
         self.last_saved_file_path = fp
